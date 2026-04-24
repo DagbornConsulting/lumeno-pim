@@ -1,0 +1,136 @@
+/* Login styles */
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #E8E2DE;
+  padding: 20px;
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.login-box {
+  width: 100%;
+  max-width: 400px;
+  background: #EDE8E5;
+  border: 1px solid #b6b8a5;
+  border-radius: 16px;
+  padding: 40px;
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.login-icon {
+  width: 64px;
+  height: 64px;
+  background: #4b4d44;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 20px;
+  color: #f0ede8;
+}
+
+.login-header h1 {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #4b4d44;
+}
+
+.login-header p {
+  font-size: 14px;
+  color: #7a7c72;
+}
+
+.login-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(176, 48, 48, 0.08);
+  border: 1px solid rgba(176, 48, 48, 0.25);
+  border-radius: 8px;
+  color: #b03030;
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
+.login-field {
+  margin-bottom: 24px;
+}
+
+.login-field label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: #7a7c72;
+  margin-bottom: 8px;
+}
+
+.login-field input {
+  width: 100%;
+  padding: 14px 16px;
+  background: #E8E2DE;
+  border: 1px solid #b6b8a5;
+  border-radius: 10px;
+  font-size: 16px;
+  color: #4b4d44;
+  transition: border-color 0.15s ease;
+  box-sizing: border-box;
+}
+
+.login-field input:focus {
+  outline: none;
+  border-color: #4b4d44;
+  box-shadow: 0 0 0 3px rgba(75, 77, 68, 0.1);
+}
+
+.login-field input::placeholder {
+  color: #9a9c92;
+}
+
+.login-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 24px;
+  background: #4b4d44;
+  color: #f0ede8;
+  border: none;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  box-sizing: border-box;
+}
+
+.login-button:hover:not(:disabled) {
+  background: #3a3c34;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(75, 77, 68, 0.25);
+}
+
+.login-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Spinner animation */
+.login-button .spin,
+.login-container .spin {
+  animation: login-spin 1s linear infinite;
+}
+
+@keyframes login-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

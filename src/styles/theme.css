@@ -1,0 +1,185 @@
+/* ============================================
+   Lumeno PIM — Theme
+   Mjuka bakgrundsfärger, mörka knappar/text/rubriker
+   Tydliga sync status-färger
+   ============================================ */
+
+:root {
+  /* Soft background palette */
+  --bg: #f7f5f2;           /* warm off-white (soft beige) */
+  --bg-alt: #ffffff;
+  --bg-panel: #fbf9f6;
+  --bg-sunken: #f0ede8;
+  --bg-hover: #eceae4;
+
+  /* Dark foreground */
+  --fg: #1a1a1a;           /* near-black text */
+  --fg-soft: #3a3a3a;
+  --fg-muted: #6b6a67;
+  --fg-dim: #9a9895;
+
+  /* Borders */
+  --border: #e3ded7;
+  --border-strong: #cdc6bc;
+
+  /* Accents */
+  --accent: #1a1a1a;       /* buttons: dark */
+  --accent-hover: #000000;
+  --accent-contrast: #ffffff;
+  --accent-soft: #2d2b28;
+
+  /* Sync status colors (tydliga) */
+  --status-synced: #2f8f55;        /* grön = synkad */
+  --status-synced-bg: #e6f4ec;
+  --status-modified: #c98a16;      /* gul/orange = ändrad ej pushad */
+  --status-modified-bg: #fdf3dc;
+  --status-new: #b83a3a;           /* röd = bara i PIM */
+  --status-new-bg: #fbe5e5;
+  --status-error: #8a1f1f;
+  --status-error-bg: #f5d5d5;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(20, 15, 5, 0.05);
+  --shadow: 0 2px 8px rgba(20, 15, 5, 0.08);
+  --shadow-lg: 0 8px 24px rgba(20, 15, 5, 0.12);
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  /* Fonts */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5 {
+  color: var(--fg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+h1 { font-size: 24px; }
+h2 { font-size: 20px; }
+h3 { font-size: 16px; }
+
+a { color: var(--fg); }
+
+/* Buttons */
+button {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-alt);
+  color: var(--fg);
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
+}
+button:hover:not(:disabled) { background: var(--bg-hover); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
+}
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+button.ghost:hover:not(:disabled) { background: var(--bg-hover); }
+
+button.danger {
+  background: var(--status-new);
+  color: #fff;
+  border-color: var(--status-new);
+}
+
+button.sm { padding: 5px 10px; font-size: 13px; }
+
+/* Inputs */
+input, select, textarea {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  width: 100%;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--fg);
+  box-shadow: 0 0 0 3px rgba(26, 26, 26, 0.08);
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-soft);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Status badge */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.status-badge::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.status-badge.synced { color: var(--status-synced); background: var(--status-synced-bg); }
+.status-badge.modified { color: var(--status-modified); background: var(--status-modified-bg); }
+.status-badge.new { color: var(--status-new); background: var(--status-new-bg); }
+.status-badge.error { color: var(--status-error); background: var(--status-error-bg); }
+
+/* Panels & cards */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.card {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }

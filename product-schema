@@ -1,0 +1,916 @@
+{%- comment -%}
+  Todas Schema Framework - Product (Multimarket Ready)
+  Dynamisk Schema.org för produktsidor
+  Placering: Rendera i main-product.liquid
+
+  MULTIMARKET STÖD:
+  - Market-anpassade URLs via request.origin + locale.root_url
+  - Dynamisk valuta per marknad via cart.currency.iso_code
+  - Korrekt shipping destination baserad på aktuell marknad
+
+  FUNKTIONER:
+  - Korrekt prisformat (divided_by: 100.0)
+  - Stöd för Shopify kategori-metafält
+  - Korrekt hantering av metafält-strukturer via JSON split
+  - Stöd för 7+ review-appar
+
+  REVIEW-APPAR:
+  - Shopify native, Judge.me, Loox, Stamped, Yotpo, Rivyo, Ali Reviews
+
+  CHANGELOG:
+  v1.5 - Fixar:
+    4. Borttagen: Storlek (size) från produktnivå — variantspecifikt värde, hör hemma per Offer
+    5. Borttagen: shoe-size taxonomy från produktnivå — samma orsak
+       Storlek hör till varje enskild variant, inte till produkten som helhet
+  v1.4 - Fixar:
+    3. manufacturer-blocket borttaget (fel för återförsäljare)
+    attributes_json-nyckeln korrigerad
+  v1.3 - Fixar:
+    seller name borttaget ur enkel-offer, manufacturer rensat
+  v1.2 - Tillägg:
+    custom.attributes_json (JSON-metafält) — brand-specifika attribut per produkt
+       Metafält: namespace=custom, key=attributes_json, typ=JSON
+       Format: [{"name":"Tåform","value":"Smal cutter toe"},{"name":"Klackhöjd","value":"4,8 cm"}]
+  v1.1 - Fixar:
+    1. Rich text JSON-läckage i description (kort_produktbeskrivning + short_description)
+    2. Vikt-konvertering för kg-enhetstyp (variant.weight är alltid gram i Liquid)
+
+  Användning:
+  {% render 'todas-schema-product', product: product %}
+{%- endcomment -%}
+
+{%- if product -%}
+
+{%- comment -%} Multimarket: Beräkna aktuella marknads-URLs {%- endcomment -%}
+{%- assign base_url = request.origin | default: shop.url -%}
+{%- assign _root = request.locale.root_url | default: '' -%}
+{%- if _root == '/' -%}{%- assign _root = '' -%}{%- endif -%}
+{%- assign market_url = base_url | append: _root -%}
+
+{%- comment -%} ============================================= {%- endcomment -%}
+{%- comment -%} RECENSIONSDATA FRÅN OLIKA KÄLLOR             {%- endcomment -%}
+{%- comment -%} ============================================= {%- endcomment -%}
+{%- assign has_reviews = false -%}
+{%- assign review_count = 0 -%}
+{%- assign avg_rating = 0 -%}
+
+{%- comment -%} Shopify native reviews {%- endcomment -%}
+{%- if product.metafields.reviews.rating.value != blank -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.reviews.rating.value.rating -%}
+  {%- assign review_count = product.metafields.reviews.rating_count | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} Judge.me {%- endcomment -%}
+{%- if product.metafields.judgeme.rating != blank and has_reviews == false -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.judgeme.rating.value -%}
+  {%- assign review_count = product.metafields.judgeme.review_count.value | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} Stamped {%- endcomment -%}
+{%- if product.metafields.stamped.reviews_average != blank and has_reviews == false -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.stamped.reviews_average -%}
+  {%- assign review_count = product.metafields.stamped.reviews_count | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} Loox {%- endcomment -%}
+{%- if product.metafields.loox.avg_rating != blank and has_reviews == false -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.loox.avg_rating -%}
+  {%- assign review_count = product.metafields.loox.num_reviews | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} Yotpo {%- endcomment -%}
+{%- if product.metafields.yotpo.reviews_average != blank and has_reviews == false -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.yotpo.reviews_average -%}
+  {%- assign review_count = product.metafields.yotpo.reviews_count | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} Rivyo {%- endcomment -%}
+{%- if product.metafields.rivyo.reviews_average != blank and has_reviews == false -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.rivyo.reviews_average -%}
+  {%- assign review_count = product.metafields.rivyo.reviews_count | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} Ali Reviews {%- endcomment -%}
+{%- if product.metafields.alireviews.review_count != blank and has_reviews == false -%}
+  {%- assign has_reviews = true -%}
+  {%- assign avg_rating = product.metafields.alireviews.star_average -%}
+  {%- assign review_count = product.metafields.alireviews.review_count | default: 1 -%}
+{%- endif -%}
+
+{%- comment -%} ============================================= {%- endcomment -%}
+{%- comment -%} EXTRAHERA SHOPIFY KATEGORI-METAFÄLT           {%- endcomment -%}
+{%- comment -%} Shopify taxonomy values är objekt som         {%- endcomment -%}
+{%- comment -%} serialiseras till {"label":"X","taxonomy_     {%- endcomment -%}
+{%- comment -%} reference":"gid://..."} via | json.           {%- endcomment -%}
+{%- comment -%} .label och .name fungerar INTE i Liquid,      {%- endcomment -%}
+{%- comment -%} så vi parsar JSON-strängen med split.         {%- endcomment -%}
+{%- comment -%} ============================================= {%- endcomment -%}
+
+{%- comment -%} --- FÄRG --- {%- endcomment -%}
+{%- assign schema_color = blank -%}
+{%- if product.metafields.shopify['color'].value != blank -%}
+  {%- assign _j = product.metafields.shopify['color'].value | json -%}
+  {%- if _j contains '"label"' -%}
+    {%- assign _parts = _j | split: '"label":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_color = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- elsif _j contains '"name"' -%}
+    {%- assign _parts = _j | split: '"name":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_color = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- else -%}
+    {%- unless _j contains '{' or _j contains '[' -%}
+      {%- assign schema_color = product.metafields.shopify['color'].value -%}
+    {%- endunless -%}
+  {%- endif -%}
+{%- elsif product.metafields.custom.color != blank -%}
+  {%- assign schema_color = product.metafields.custom.color -%}
+{%- endif -%}
+
+{%- comment -%} --- MATERIAL --- {%- endcomment -%}
+{%- assign schema_material = blank -%}
+{%- if product.metafields.shopify['material'].value != blank -%}
+  {%- assign _j = product.metafields.shopify['material'].value | json -%}
+  {%- if _j contains '"label"' -%}
+    {%- assign _parts = _j | split: '"label":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_material = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- elsif _j contains '"name"' -%}
+    {%- assign _parts = _j | split: '"name":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_material = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- else -%}
+    {%- unless _j contains '{' or _j contains '[' -%}
+      {%- assign schema_material = product.metafields.shopify['material'].value -%}
+    {%- endunless -%}
+  {%- endif -%}
+{%- elsif product.metafields.custom.material != blank -%}
+  {%- assign schema_material = product.metafields.custom.material -%}
+{%- endif -%}
+
+{%- comment -%} --- MÖNSTER (Pattern) --- {%- endcomment -%}
+{%- assign schema_pattern = blank -%}
+{%- if product.metafields.shopify['pattern'].value != blank -%}
+  {%- assign _j = product.metafields.shopify['pattern'].value | json -%}
+  {%- if _j contains '"label"' -%}
+    {%- assign _parts = _j | split: '"label":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_pattern = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- elsif _j contains '"name"' -%}
+    {%- assign _parts = _j | split: '"name":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_pattern = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- else -%}
+    {%- unless _j contains '{' or _j contains '[' -%}
+      {%- assign schema_pattern = product.metafields.shopify['pattern'].value -%}
+    {%- endunless -%}
+  {%- endif -%}
+{%- elsif product.metafields.custom.pattern != blank -%}
+  {%- assign schema_pattern = product.metafields.custom.pattern -%}
+{%- endif -%}
+
+{%- comment -%} --- MÅLGRUPP (Gender & Age) --- {%- endcomment -%}
+{%- assign schema_gender = blank -%}
+{%- assign schema_age_group = blank -%}
+
+{%- if product.metafields.shopify['target-gender'].value != blank -%}
+  {%- assign _j = product.metafields.shopify['target-gender'].value | json -%}
+  {%- if _j contains '"label"' -%}
+    {%- assign _parts = _j | split: '"label":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_gender = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- elsif _j contains '"name"' -%}
+    {%- assign _parts = _j | split: '"name":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_gender = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- else -%}
+    {%- unless _j contains '{' or _j contains '[' -%}
+      {%- assign schema_gender = product.metafields.shopify['target-gender'].value -%}
+    {%- endunless -%}
+  {%- endif -%}
+{%- elsif product.metafields.custom.gender != blank -%}
+  {%- assign schema_gender = product.metafields.custom.gender -%}
+{%- endif -%}
+
+{%- if product.metafields.shopify['age-group'].value != blank -%}
+  {%- assign _j = product.metafields.shopify['age-group'].value | json -%}
+  {%- if _j contains '"label"' -%}
+    {%- assign _parts = _j | split: '"label":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_age_group = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- elsif _j contains '"name"' -%}
+    {%- assign _parts = _j | split: '"name":"' -%}
+    {%- if _parts.size > 1 -%}{%- assign schema_age_group = _parts[1] | split: '"' | first -%}{%- endif -%}
+  {%- else -%}
+    {%- unless _j contains '{' or _j contains '[' -%}
+      {%- assign schema_age_group = product.metafields.shopify['age-group'].value -%}
+    {%- endunless -%}
+  {%- endif -%}
+{%- elsif product.metafields.custom.age_group != blank -%}
+  {%- assign schema_age_group = product.metafields.custom.age_group -%}
+{%- endif -%}
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Product",
+  "@id": "{{ market_url }}{{ product.url }}#product",
+  "name": {{ product.title | json }},
+  "url": "{{ market_url }}{{ product.url }}",
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} BESKRIVNING               {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+
+  {%- assign _desc = blank -%}
+  {%- assign _desc_raw_check = blank -%}
+
+  {%- if product.metafields.custom.kort_produktbeskrivning != blank -%}
+    {%- assign _desc_raw_check = product.metafields.custom.kort_produktbeskrivning | metafield_tag | strip_html | strip -%}
+    {%- assign _desc = _desc_raw_check -%}
+
+  {%- elsif product.metafields.custom.short_description != blank -%}
+    {%- assign _desc_raw_check = product.metafields.custom.short_description | metafield_tag | strip_html | strip -%}
+    {%- assign _desc = _desc_raw_check -%}
+
+  {%- elsif product.description != blank -%}
+    {%- assign _raw_desc = product.description | strip_html -%}
+    {%- if _raw_desc contains '"type":"root"' -%}
+      {%- assign _desc = '' -%}
+      {%- assign _text_parts = _raw_desc | split: '"value":"' -%}
+      {%- for _tp in _text_parts -%}
+        {%- unless forloop.first -%}
+          {%- assign _tv = _tp | split: '"' | first -%}
+          {%- if _tv != blank -%}{%- assign _desc = _desc | append: _tv | append: ' ' -%}{%- endif -%}
+        {%- endunless -%}
+      {%- endfor -%}
+      {%- assign _desc = _desc | strip -%}
+    {%- else -%}
+      {%- assign _desc = _raw_desc -%}
+    {%- endif -%}
+  {%- endif -%}
+
+  {%- if _desc != blank -%}
+  "description": {{ _desc | truncate: 5000 | json }},
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} IDENTIFIERARE             {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if product.selected_or_first_available_variant.sku != blank -%}
+  "sku": {{ product.selected_or_first_available_variant.sku | json }},
+  {%- elsif product.variants.first.sku != blank -%}
+  "sku": {{ product.variants.first.sku | json }},
+  {%- endif -%}
+
+  {%- if product.metafields.custom.mpn != blank -%}
+  "mpn": {{ product.metafields.custom.mpn | json }},
+  {%- endif -%}
+
+  {%- comment -%} GTIN/EAN/UPC baserat på längd {%- endcomment -%}
+  {%- if product.selected_or_first_available_variant.barcode != blank -%}
+    {%- assign barcode = product.selected_or_first_available_variant.barcode -%}
+    {%- assign barcode_length = barcode | size -%}
+    {%- if barcode_length == 8 -%}
+  "gtin8": {{ barcode | json }},
+    {%- elsif barcode_length == 12 -%}
+  "gtin12": {{ barcode | json }},
+    {%- elsif barcode_length == 13 -%}
+  "gtin13": {{ barcode | json }},
+    {%- elsif barcode_length == 14 -%}
+  "gtin14": {{ barcode | json }},
+    {%- else -%}
+  "gtin": {{ barcode | json }},
+    {%- endif -%}
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} VARUMÄRKE                 {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if product.vendor != blank -%}
+  "brand": {
+    "@type": "Brand",
+    "name": {{ product.vendor | json }}
+  },
+  {%- else -%}
+  "brand": {
+    "@type": "Organization",
+    "@id": "{{ base_url }}#organization",
+    "name": {{ shop.name | json }}
+  },
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} BILDER                    {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if product.featured_image -%}
+  "image": [
+    {%- for image in product.images limit: 10 -%}
+    "{{ image | image_url: width: 1200 }}"{% unless forloop.last %},{% endunless %}
+    {%- endfor -%}
+  ],
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} KATEGORI                  {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if product.metafields.custom.kategori != blank -%}
+  "category": {{ product.metafields.custom.kategori | json }},
+  {%- elsif product.metafields.custom.category != blank -%}
+  "category": {{ product.metafields.custom.category | json }},
+  {%- elsif product.category != blank -%}
+  "category": {{ product.category.name | json }},
+  {%- elsif product.type != blank -%}
+  "category": {{ product.type | json }},
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} FÄRG, MATERIAL, MÖNSTER   {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if schema_color != blank -%}
+  "color": {{ schema_color | json }},
+  {%- endif -%}
+  {%- if schema_material != blank -%}
+  "material": {{ schema_material | json }},
+  {%- endif -%}
+  {%- if schema_pattern != blank -%}
+  "pattern": {{ schema_pattern | json }},
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} MÅLGRUPP (Audience)       {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if schema_gender != blank or schema_age_group != blank -%}
+  "audience": {
+    "@type": "PeopleAudience"
+    {%- if schema_gender != blank -%}
+    ,"suggestedGender": {{ schema_gender | json }}
+    {%- endif -%}
+    {%- if schema_age_group != blank -%}
+    ,"suggestedAge": {{ schema_age_group | json }}
+    {%- endif -%}
+  },
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} VIKT                      {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%}
+    variant.weight returnerar ALLTID gram i Shopify Liquid.
+    Alla grenar konverterar från gram till rätt enhet.
+  {%- endcomment -%}
+  {%- if product.variants.first.weight > 0 -%}
+  {%- assign _w_raw = product.variants.first.weight -%}
+  {%- assign _w_unit = product.variants.first.weight_unit -%}
+  {%- if _w_unit == 'g' -%}
+    {%- assign _w_value = _w_raw | divided_by: 1000.0 -%}
+    {%- assign _w_code = 'KGM' -%}
+  {%- elsif _w_unit == 'kg' -%}
+    {%- assign _w_value = _w_raw | divided_by: 1000.0 -%}
+    {%- assign _w_code = 'KGM' -%}
+  {%- elsif _w_unit == 'lb' -%}
+    {%- assign _w_value = _w_raw | divided_by: 453.592 -%}
+    {%- assign _w_code = 'LBR' -%}
+  {%- elsif _w_unit == 'oz' -%}
+    {%- assign _w_value = _w_raw | divided_by: 28.3495 -%}
+    {%- assign _w_code = 'ONZ' -%}
+  {%- else -%}
+    {%- assign _w_value = _w_raw | divided_by: 1000.0 -%}
+    {%- assign _w_code = 'KGM' -%}
+  {%- endif -%}
+  "weight": {
+    "@type": "QuantitativeValue",
+    "value": {{ _w_value }},
+    "unitCode": "{{ _w_code }}"
+  },
+{%- endif -%}
+
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- comment -%} ADDITIONAL PROPERTY - Dynamisk                {%- endcomment -%}
+  {%- comment -%}                                               {%- endcomment -%}
+  {%- comment -%} OBS: Storlek (size) och shoe-size är          {%- endcomment -%}
+  {%- comment -%} BORTTAGNA från produktnivå (v1.5).            {%- endcomment -%}
+  {%- comment -%} Storlek är variantspecifikt och hör hemma     {%- endcomment -%}
+  {%- comment -%} per Offer, inte på Product.                   {%- endcomment -%}
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- assign schema_props = "" -%}
+
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- comment -%} KLÄDER & ACCESSOARER                         {%- endcomment -%}
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- if product.metafields.shopify['fabric'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['fabric'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['fabric'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Fabric","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['care-instructions'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['care-instructions'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['care-instructions'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Care instructions","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['sleeve-length-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['sleeve-length-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['sleeve-length-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Sleeve length type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['clothing-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['clothing-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['clothing-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Clothing features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['neckline'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['neckline'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['neckline'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Neckline","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['intimate-apparel-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['intimate-apparel-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['intimate-apparel-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Intimate apparel features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['waist-rise'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['waist-rise'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['waist-rise'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Waist rise","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['pants-length-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['pants-length-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['pants-length-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Pants length type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['top-length-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['top-length-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['top-length-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Top length type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['accessory-size'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['accessory-size'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['accessory-size'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Accessory size","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['outerwear-clothing-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['outerwear-clothing-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['outerwear-clothing-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Outerwear clothing features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['activity'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['activity'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['activity'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Activity","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['fit'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['fit'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['fit'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Fit","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['baby-toddler-clothing-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['baby-toddler-clothing-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['baby-toddler-clothing-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Baby/Toddler clothing features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['maternity-clothing-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['maternity-clothing-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['maternity-clothing-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Maternity clothing features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['swimwear-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['swimwear-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['swimwear-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Swimwear features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['activewear-clothing-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['activewear-clothing-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['activewear-clothing-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Activewear clothing features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- comment -%} shoe-size BORTTAGEN v1.5 — variantspecifikt värde {%- endcomment -%}
+  {%- if product.metafields.shopify['carry-options'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['carry-options'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['carry-options'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Carry options","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['bag-case-material'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['bag-case-material'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['bag-case-material'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Bag/Case material","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['clothing-accessory-material'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['clothing-accessory-material'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['clothing-accessory-material'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Clothing accessory material","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['bag-case-closure'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['bag-case-closure'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['bag-case-closure'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Bag Case Closure","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['bag-case-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['bag-case-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['bag-case-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Bag/Case features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['bag-case-storage-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['bag-case-storage-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['bag-case-storage-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Bag/Case storage features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['jewelry-material'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['jewelry-material'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['jewelry-material'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Jewelry material","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['skirt-dress-length-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['skirt-dress-length-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['skirt-dress-length-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Skirt/Dress length type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['headwear-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['headwear-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['headwear-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Headwear features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['closure-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['closure-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['closure-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Closure type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['footwear-material'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['footwear-material'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['footwear-material'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Footwear material","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['shoe-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['shoe-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['shoe-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Shoe features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['shoe-fit'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['shoe-fit'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['shoe-fit'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Shoe fit","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['toe-style'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['toe-style'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['toe-style'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Toe style","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['jewelry-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['jewelry-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['jewelry-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Jewelry type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['wallet-features'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['wallet-features'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['wallet-features'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Wallet features","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['occasion-style'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['occasion-style'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['occasion-style'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Occasion style","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['dress-style'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['dress-style'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['dress-style'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Dress style","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['cup-size'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['cup-size'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['cup-size'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Cup size","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['dress-occasion'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['dress-occasion'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['dress-occasion'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Dress occasion","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['embellishment-trim-material'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['embellishment-trim-material'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['embellishment-trim-material'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Embellishment/Trim material","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['heel-height-type'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['heel-height-type'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['heel-height-type'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Heel height type","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['shapewear-support-level'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['shapewear-support-level'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['shapewear-support-level'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Shapewear support level","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['one-piece-style'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['one-piece-style'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['one-piece-style'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"One-piece style","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+  {%- if product.metafields.shopify['boot-style'].value != blank -%}
+    {%- assign _val = blank -%}
+    {%- assign _j = product.metafields.shopify['boot-style'].value | json -%}
+    {%- if _j contains '"label"' -%}{%- assign _p = _j | split: '"label":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- elsif _j contains '"name"' -%}{%- assign _p = _j | split: '"name":"' -%}{%- if _p.size > 1 -%}{%- assign _val = _p[1] | split: '"' | first -%}{%- endif -%}
+    {%- else -%}{%- unless _j contains '{' or _j contains '[' -%}{%- assign _val = product.metafields.shopify['boot-style'].value -%}{%- endunless -%}{%- endif -%}
+    {%- if _val != blank -%}{%- capture prop -%}{"@type":"PropertyValue","name":"Boot style","value":{{ _val | json }}}{%- endcapture -%}{%- assign schema_props = schema_props | append: prop | append: ";;;" -%}{%- endif -%}
+  {%- endif -%}
+
+  {%- comment -%} === CUSTOM METAFÄLT === {%- endcomment -%}
+  {%- if product.metafields.custom.specifikationer != blank -%}
+    {%- capture prop -%}{"@type":"PropertyValue","name":"Specifikationer","value":{{ product.metafields.custom.specifikationer | strip_html | json }}}{%- endcapture -%}
+    {%- assign schema_props = schema_props | append: prop | append: ";;;" -%}
+  {%- elsif product.metafields.custom.specifications != blank -%}
+    {%- capture prop -%}{"@type":"PropertyValue","name":"Specifications","value":{{ product.metafields.custom.specifications | strip_html | json }}}{%- endcapture -%}
+    {%- assign schema_props = schema_props | append: prop | append: ";;;" -%}
+  {%- endif -%}
+
+  {%- if product.metafields.custom.skotselrad != blank -%}
+    {%- capture prop -%}{"@type":"PropertyValue","name":"Skötselråd","value":{{ product.metafields.custom.skotselrad | strip_html | json }}}{%- endcapture -%}
+    {%- assign schema_props = schema_props | append: prop | append: ";;;" -%}
+  {%- elsif product.metafields.custom.care_instructions != blank -%}
+    {%- capture prop -%}{"@type":"PropertyValue","name":"Care Instructions","value":{{ product.metafields.custom.care_instructions | strip_html | json }}}{%- endcapture -%}
+    {%- assign schema_props = schema_props | append: prop | append: ";;;" -%}
+  {%- endif -%}
+
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- comment -%} CUSTOM.ATTRIBUTES_JSON — Brand-specifika      {%- endcomment -%}
+  {%- comment -%} Metafält: namespace=custom, key=attributes_json {%- endcomment -%}
+  {%- comment -%} Typ: JSON                                      {%- endcomment -%}
+  {%- comment -%} Format:                                        {%- endcomment -%}
+  {%- comment -%} [{"name":"Skafthöjd","value":"30 cm"},         {%- endcomment -%}
+  {%- comment -%}  {"name":"Klackhöjd","value":"4,8 cm"}]        {%- endcomment -%}
+  {%- comment -%} Använd för attribut som INTE finns i Shopify   {%- endcomment -%}
+  {%- comment -%} taxonomy — undvik dubbletter med taxonomy-fält {%- endcomment -%}
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- if product.metafields.custom.attributes_json != blank -%}
+    {%- for attr in product.metafields.custom.attributes_json.value -%}
+      {%- if attr.name != blank and attr.value != blank -%}
+        {%- capture prop -%}{"@type":"PropertyValue","name":{{ attr.name | json }},"value":{{ attr.value | json }}}{%- endcapture -%}
+        {%- assign schema_props = schema_props | append: prop | append: ";;;" -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+
+  {%- comment -%} Rendera additionalProperty om det finns något {%- endcomment -%}
+  {%- if schema_props != "" -%}
+    {%- assign props_array = schema_props | split: ";;;" -%}
+  "additionalProperty": [
+    {%- for prop in props_array -%}
+      {%- if prop != "" -%}
+    {{ prop }}{% unless forloop.last %},{% endunless %}
+      {%- endif -%}
+    {%- endfor -%}
+  ],
+  {%- endif -%}
+
+  {%- comment -%} ============================================= {%- endcomment -%}
+  {%- comment -%} OFFERS - PRISER & VARIANTER                   {%- endcomment -%}
+  {%- comment -%}                                               {%- endcomment -%}
+  {%- comment -%} Availability per variant:                     {%- endcomment -%}
+  {%- comment -%}   InStock   — variant.available = true        {%- endcomment -%}
+  {%- comment -%}   OutOfStock — variant.available = false       {%- endcomment -%}
+  {%- comment -%}   BackOrder — inventory_policy = continue     {%- endcomment -%}
+  {%- comment -%} Uppdateras i realtid vid varje sidladdning.   {%- endcomment -%}
+  {%- comment -%} ============================================= {%- endcomment -%}
+
+  {%- if product.variants.size == 1 -%}
+    {%- assign variant = product.variants.first -%}
+    {%- capture offer_price %}{{ variant.price | divided_by: 100.0 }}{% endcapture -%}
+  "offers": {
+    "@type": "Offer",
+    "@id": "{{ market_url }}{{ product.url }}#offer",
+    "url": "{{ market_url }}{{ product.url }}",
+    "price": {{ offer_price | remove: ',' | remove: ' ' }},
+    "priceCurrency": {{ cart.currency.iso_code | json }},
+    "priceValidUntil": "{{ 'now' | date: '%Y' | plus: 1 }}-12-31",
+    {%- if variant.available -%}
+      {%- if variant.inventory_quantity > 0 -%}
+    "availability": "https://schema.org/InStock",
+    "inventoryLevel": {
+      "@type": "QuantitativeValue",
+      "value": {{ variant.inventory_quantity }}
+    },
+      {%- else -%}
+    "availability": "https://schema.org/InStock",
+      {%- endif -%}
+    {%- else -%}
+      {%- if variant.inventory_policy == 'continue' -%}
+    "availability": "https://schema.org/BackOrder",
+      {%- else -%}
+    "availability": "https://schema.org/OutOfStock",
+      {%- endif -%}
+    {%- endif -%}
+    {%- if variant.sku != blank -%}
+    "sku": {{ variant.sku | json }},
+    {%- endif -%}
+    {%- if variant.barcode != blank -%}
+    "gtin": {{ variant.barcode | json }},
+    {%- endif -%}
+    "itemCondition": "https://schema.org/NewCondition",
+    "seller": {
+      "@type": "Organization",
+      "@id": "{{ base_url }}#organization"
+    },
+    "shippingDetails": {
+      "@type": "OfferShippingDetails",
+      "shippingDestination": {
+        "@type": "DefinedRegion",
+        "addressCountry": {{ localization.country.iso_code | default: shop.address.country_code | default: 'SE' | json }}
+      }
+    }
+  },
+
+  {%- else -%}
+    {%- capture low_price %}{{ product.price_min | divided_by: 100.0 }}{% endcapture -%}
+    {%- capture high_price %}{{ product.price_max | divided_by: 100.0 }}{% endcapture -%}
+  "offers": {
+    "@type": "AggregateOffer",
+    "@id": "{{ market_url }}{{ product.url }}#aggregate-offer",
+    "url": "{{ market_url }}{{ product.url }}",
+    "priceCurrency": {{ cart.currency.iso_code | json }},
+    "lowPrice": {{ low_price | remove: ',' | remove: ' ' }},
+    "highPrice": {{ high_price | remove: ',' | remove: ' ' }},
+    "offerCount": {{ product.variants.size }},
+    {%- if product.available -%}
+    "availability": "https://schema.org/InStock",
+    {%- else -%}
+    "availability": "https://schema.org/OutOfStock",
+    {%- endif -%}
+    "offers": [
+      {%- for variant in product.variants limit: 50 -%}
+        {%- capture variant_price %}{{ variant.price | divided_by: 100.0 }}{% endcapture -%}
+      {
+        "@type": "Offer",
+        "@id": "{{ market_url }}{{ variant.url }}#offer",
+        "url": "{{ market_url }}{{ variant.url }}",
+        "name": {{ variant.title | json }},
+        "price": {{ variant_price | remove: ',' | remove: ' ' }},
+        "priceCurrency": {{ cart.currency.iso_code | json }},
+        "priceValidUntil": "{{ 'now' | date: '%Y' | plus: 1 }}-12-31",
+        {%- if variant.available -%}
+        "availability": "https://schema.org/InStock",
+        {%- else -%}
+          {%- if variant.inventory_policy == 'continue' -%}
+        "availability": "https://schema.org/BackOrder",
+          {%- else -%}
+        "availability": "https://schema.org/OutOfStock",
+          {%- endif -%}
+        {%- endif -%}
+        {%- if variant.sku != blank -%}
+        "sku": {{ variant.sku | json }},
+        {%- endif -%}
+        {%- if variant.barcode != blank -%}
+        "gtin": {{ variant.barcode | json }},
+        {%- endif -%}
+        "itemCondition": "https://schema.org/NewCondition",
+        "seller": {
+          "@type": "Organization",
+          "@id": "{{ base_url }}#organization"
+        }
+      }{% unless forloop.last %},{% endunless %}
+      {%- endfor -%}
+    ]
+  },
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} RECENSIONER               {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- if has_reviews and review_count > 0 -%}
+  "aggregateRating": {
+    "@type": "AggregateRating",
+    "ratingValue": {{ avg_rating }},
+    "reviewCount": {{ review_count }},
+    "bestRating": 5,
+    "worstRating": 1
+  },
+  {%- endif -%}
+
+  {%- comment -%} ========================= {%- endcomment -%}
+  {%- comment -%} MAIN ENTITY               {%- endcomment -%}
+  {%- comment -%} ========================= {%- endcomment -%}
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "{{ market_url }}{{ product.url }}"
+  }
+}
+</script>
+{%- endif -%}

@@ -1,0 +1,629 @@
+/* Price Manager Styles */
+.price-manager {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.price-manager-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.price-manager-header .header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-warning {
+  background: var(--warning) !important;
+  color: #f0ede8 !important;
+}
+
+.btn-warning:hover {
+  filter: brightness(1.1);
+}
+
+/* Campaign History Panel */
+.campaign-history-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.campaign-history-panel .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--surface-hover);
+  border-bottom: 1px solid var(--border);
+}
+
+.campaign-history-panel .panel-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.empty-history {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.empty-history svg {
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+
+.empty-history p {
+  font-size: 14px;
+}
+
+.campaign-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.campaign-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s ease;
+}
+
+.campaign-item:last-child {
+  border-bottom: none;
+}
+
+.campaign-item:hover {
+  background: var(--surface-hover);
+}
+
+.campaign-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.campaign-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.campaign-details {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.campaign-discount {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--error);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.campaign-count {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.campaign-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-sm {
+  padding: 6px 12px !important;
+  font-size: 12px !important;
+}
+
+.btn-ghost {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+}
+
+.btn-ghost:hover {
+  background: var(--surface-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* Main Content Layout */
+.price-manager-content {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 20px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Filters Panel */
+.price-filters-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  height: fit-content;
+  max-height: calc(100vh - 200px);
+}
+
+.price-filters-panel .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--surface-hover);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.price-filters-panel .panel-header:hover {
+  background: var(--bg-secondary);
+}
+
+.price-filters-panel .panel-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.filter-count {
+  background: var(--accent);
+  color: #000;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.filters-content {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.filter-section {
+  margin-bottom: 20px;
+}
+
+.filter-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.filter-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.filter-search svg {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.filter-search input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.filter-search button {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.filter-search button:hover {
+  color: var(--text-primary);
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.filter-chip:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.filter-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+}
+
+.chip-count {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* Discount Controls */
+.discount-controls {
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.discount-controls h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.discount-input-group {
+  margin-bottom: 14px;
+}
+
+.discount-input-group label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.discount-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.discount-input-wrapper input {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-primary);
+  text-align: center;
+}
+
+.discount-input-wrapper input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.discount-input-wrapper span {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.discount-input-group select {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.discount-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.preset-btn {
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preset-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.preset-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+}
+
+.discount-summary {
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.summary-row span {
+  color: var(--text-secondary);
+}
+
+.summary-row strong {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.discount-controls .btn-large {
+  width: 100%;
+  padding: 14px !important;
+  font-size: 14px !important;
+}
+
+/* Products Panel */
+.price-products-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.price-products-panel .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  background: var(--surface-hover);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.price-products-panel .panel-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.product-count {
+  font-weight: 400;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.price-manager .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.price-manager .checkbox-label input {
+  position: static;
+  width: 16px;
+  height: 16px;
+  opacity: 1;
+  accent-color: var(--accent);
+}
+
+/* Product List */
+.price-product-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.empty-products {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.empty-products svg {
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.empty-products h4 {
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.empty-products p {
+  font-size: 14px;
+}
+
+.price-product-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.price-product-row:hover {
+  background: var(--surface-hover);
+}
+
+.price-product-row.selected {
+  background: var(--accent-dim);
+}
+
+.price-product-row.has-discount {
+  border-left: 3px solid var(--error);
+}
+
+.row-checkbox {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.row-checkbox.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+}
+
+.product-image-small {
+  width: 44px;
+  height: 44px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+}
+
+.product-image-small img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.price-product-row .product-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.price-product-row .product-title {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+.price-product-row .product-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.product-prices {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.price-compare {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+
+.price-current {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.price-current.discounted {
+  color: var(--error);
+}
+
+.price-new {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--success);
+}
+
+.price-savings {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  background: var(--error);
+  color: #fff;
+  border-radius: 4px;
+}
+
+/* Responsive */
+@media (max-width: 1000px) {
+  .price-manager-content {
+    grid-template-columns: 1fr;
+  }
+  
+  .price-filters-panel {
+    max-height: none;
+  }
+}
