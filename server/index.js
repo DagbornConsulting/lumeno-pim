@@ -42,7 +42,6 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-console.log('[boot] index.js module loaded');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -341,7 +340,7 @@ app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // Login endpoint
 app.post('/api/auth/login', async (req, res) => {
-  console.log('[login] handler start');
+
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -352,19 +351,19 @@ app.post('/api/auth/login', async (req, res) => {
 
   // Look up user in Supabase
   if (useSupabaseSessions) {
-    console.log('[login] querying supabase, useSupabaseSessions=true, supabase=', !!supabase);
+
     try {
       const { data, error } = await supabase
         .from('users')
         .select('id, name, email, password_hash, role')
         .eq('email', email.toLowerCase())
         .single();
-      console.log('[login] supabase done, error=', error?.message, 'found=', !!data);
+
       if (!error && data) {
         user = data;
       }
     } catch (e) {
-      console.log('[login] supabase threw:', e.message);
+
       // Fall through to memory
     }
   }
