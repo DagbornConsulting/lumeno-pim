@@ -1,21 +1,26 @@
 // Vercel serverless wrapper.
-// Re-exports the Express app as a single function that handles all /api/* requests.
-// app.listen() is skipped automatically when process.env.VERCEL is set.
+// Uses dynamic imports so esbuild does NOT inline server/index.js
+// (which is ~4000 lines + dependencies) into one giant bundle.
 
-import serverless from 'serverless-http';
-import app from '../server/index.js';
-
-const handler = serverless(app);
+let handler = null;
 
 export default async function (req, res) {
+  if (!handler) {
+    try {
+      const [{ default: serverless }, { default: app }] = await Promise.all([
+        import('serverless-http'),
+        import('../server/index.js'),
+      ]);
+      handler = serverless(app);
+    } catch (e) {
+      console.error('[slug] init error:', e.message);
+      return res.status(500).json({ error: 'Server init failed', detail: e.message });
+    }
+  }
   return handler(req, res);
 }
 
 export const config = {
-  // Use Node.js runtime (not Edge) for full Express compatibility.
   runtime: 'nodejs',
-  // Bump from 4.5MB default to allow larger product imports/uploads (Pro: up to 50MB).
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
