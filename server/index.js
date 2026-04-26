@@ -2443,27 +2443,17 @@ app.put('/api/db/products/:id', async (req, res) => {
       }
     }
 
-    // Markera produkten som "pending" för Central-butiken (om den finns där)
-    // så användaren ser att den behöver synkas
+    // Markera produkten som "pending" — på produkten direkt och i alla store_products
     try {
-      const { data: centralStore } = await supabase
-        .from('stores')
-        .select('id')
-        .or('domain.ilike.%pq-golf-sverige%,name.ilike.%central%,name.ilike.%pq golf%')
-        .single();
-
-      if (centralStore) {
-        await supabase
-          .from('store_products')
-          .update({
-            sync_status: 'pending',
-            updated_at: new Date().toISOString()
-          })
-          .eq('product_id', req.params.id)
-          .eq('store_id', centralStore.id);
-      }
+      await supabase
+        .from('products')
+        .update({ sync_status: 'pending' })
+        .eq('id', req.params.id);
+      await supabase
+        .from('store_products')
+        .update({ sync_status: 'pending', updated_at: new Date().toISOString() })
+        .eq('product_id', req.params.id);
     } catch (syncErr) {
-      // Ignorera fel här - produkten är redan uppdaterad
       console.log('Could not mark product as pending:', syncErr.message);
     }
 

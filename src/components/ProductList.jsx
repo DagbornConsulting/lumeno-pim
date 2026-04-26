@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Search, Download, Upload, Plus, RefreshCw } from 'lucide-react';
+import { Search, Download, Upload, Plus, RefreshCw, AlertTriangle } from 'lucide-react';
 import SyncBadge from './SyncBadge.jsx';
 import * as api from '../api.js';
 
@@ -85,6 +85,36 @@ export default function ProductList({ onOpen, onToast }) {
         </div>
       </div>
 
+      {(() => {
+        const unpushed = (facets.sync_counts?.modified || 0) + (facets.sync_counts?.new || 0);
+        if (!unpushed) return null;
+        return (
+          <div onClick={pushAllPending} style={{
+            display: 'flex', alignItems: 'center', gap: '12px',
+            background: '#fffbeb', border: '1px solid #fcd34d',
+            borderRadius: '8px', padding: '12px 16px', marginBottom: '16px',
+            cursor: syncing ? 'default' : 'pointer',
+          }}>
+            <AlertTriangle size={16} style={{ color: '#d97706', flexShrink: 0 }} />
+            <span style={{ flex: 1, fontSize: '14px', color: '#92400e' }}>
+              <strong>{unpushed} {unpushed === 1 ? 'produkt har' : 'produkter har'} ändringar</strong> som inte pushats till Shopify
+            </span>
+            <button
+              disabled={syncing}
+              onClick={e => { e.stopPropagation(); pushAllPending(); }}
+              style={{
+                padding: '6px 14px', background: '#d97706', color: '#fff',
+                border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer',
+                fontWeight: 500, fontSize: '13px', flexShrink: 0,
+                opacity: syncing ? 0.6 : 1,
+              }}
+            >
+              {syncing ? 'Pushar...' : 'Pusha alla'}
+            </button>
+          </div>
+        );
+      })()}
+
       <div className="filters">
         <div className="filter" style={{ flex: 1, minWidth: 220 }}>
           <Search size={16} style={{ color: 'var(--fg-muted)' }} />
@@ -157,8 +187,10 @@ export default function ProductList({ onOpen, onToast }) {
             </tr>
           </thead>
           <tbody>
-            {products.map(p => (
-              <tr key={p.id} onClick={() => onOpen(p.id)}>
+            {products.map(p => {
+              const unpushed = p.sync_status === 'modified' || p.sync_status === 'new';
+              return (
+              <tr key={p.id} onClick={() => onOpen(p.id)} style={unpushed ? { borderLeft: '3px solid #f59e0b', background: '#fffdf0' } : {}}>
                 <td className="thumb">
                   {p.first_image
                     ? <img src={p.first_image} alt="" />
@@ -175,7 +207,8 @@ export default function ProductList({ onOpen, onToast }) {
                 <td style={{ textTransform: 'capitalize' }}>{p.status}</td>
                 <td><SyncBadge status={p.sync_status} /></td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

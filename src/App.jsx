@@ -1147,6 +1147,37 @@ function ProductsView({
         </div>
       )}
 
+      {/* Pending changes banner */}
+      {(() => {
+        const pendingCount = products.filter(p =>
+          p.sync_status === 'pending' ||
+          p.storeProducts?.some(sp => sp.sync_status === 'pending')
+        ).length;
+        if (!pendingCount) return null;
+        return (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '12px',
+            background: '#fffbeb', border: '1px solid #fcd34d',
+            borderRadius: '8px', padding: '12px 16px', marginBottom: '16px',
+          }}>
+            <AlertCircle size={16} style={{ color: '#d97706', flexShrink: 0 }} />
+            <span style={{ flex: 1, fontSize: '14px', color: '#92400e' }}>
+              <strong>{pendingCount} {pendingCount === 1 ? 'produkt har' : 'produkter har'} ändringar</strong> som inte pushats till Shopify
+            </span>
+            <button
+              onClick={onPublish}
+              style={{
+                padding: '6px 14px', background: '#d97706', color: '#fff',
+                border: 'none', borderRadius: '6px', cursor: 'pointer',
+                fontWeight: 500, fontSize: '13px', flexShrink: 0,
+              }}
+            >
+              Pusha alla
+            </button>
+          </div>
+        );
+      })()}
+
       {/* Content Stats */}
       {(stats.missingDescription > 0 || stats.missingSeoTitle > 0) && (
         <div className="content-warnings">

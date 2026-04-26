@@ -201,6 +201,7 @@ export default function ProductImport({ onImportComplete, onClose }) {
   const [supplierName, setSupplierName] = useState('');
   const [saveMapping, setSaveMapping] = useState(false);
   const [matchedProfile, setMatchedProfile] = useState(null);
+  const [overrideVendor, setOverrideVendor] = useState('');
   const [preview, setPreview] = useState([]);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
@@ -395,11 +396,15 @@ export default function ProductImport({ onImportComplete, onClose }) {
     setImporting(true);
     setError(null);
     try {
+      const products = overrideVendor.trim()
+        ? preview.map(p => ({ ...p, vendor: overrideVendor.trim() }))
+        : preview;
+
       const res = await fetch(`${API_URL}/db/products/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          products: preview,
+          products,
           supplierName: saveMapping ? supplierName : null,
           mapping: saveMapping ? mapping : null,
           groupCol: saveMapping ? groupCol : null,
@@ -863,6 +868,19 @@ export default function ProductImport({ onImportComplete, onClose }) {
                   Visar 50 av {preview.length} produkter.
                 </p>
               )}
+            </div>
+
+            <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+              <label style={{ fontSize: '13px', fontWeight: 500, whiteSpace: 'nowrap' }}>
+                Sätt Vendor på alla produkter:
+              </label>
+              <input
+                type="text"
+                value={overrideVendor}
+                onChange={e => setOverrideVendor(e.target.value)}
+                placeholder="t.ex. Lumeno Home (lämna tomt för att behålla från fil)"
+                style={{ flex: 1, minWidth: '240px', padding: '7px 12px', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '13px' }}
+              />
             </div>
 
             {error && <div className="import-error"><AlertCircle size={16} /> {error}</div>}
