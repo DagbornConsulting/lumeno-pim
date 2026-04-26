@@ -1,23 +1,29 @@
 // Vercel serverless wrapper.
-// Uses dynamic imports so esbuild does NOT inline server/index.js
-// (which is ~4000 lines + dependencies) into one giant bundle.
+// Calls the Express app directly instead of via serverless-http,
+// which is built for AWS Lambda (event/context) not Vercel (req/res).
 
-let handler = null;
+let app = null;
 
 export default async function (req, res) {
-  if (!handler) {
+  if (!app) {
     try {
-      const [{ default: serverless }, { default: app }] = await Promise.all([
-        import('serverless-http'),
-        import('../server/index.js'),
-      ]);
-      handler = serverless(app);
+      console.log('[slug] loading server/index.js...');
+      const mod = await import('../server/index.js');
+      app = mod.default;
+      console.log('[slug] server ready');
     } catch (e) {
       console.error('[slug] init error:', e.message);
       return res.status(500).json({ error: 'Server init failed', detail: e.message });
     }
   }
-  return handler(req, res);
+
+  // Call Express app directly — it accepts (req, res, next) like any middleware
+  return new Promise((resolve, reject) => {
+    app(req, res, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
 }
 
 export const config = {
