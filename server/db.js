@@ -15,7 +15,16 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
 
 const supabaseClient = supabaseUrl && supabaseKey
-  ? createClient(supabaseUrl, supabaseKey)
+  ? createClient(supabaseUrl, supabaseKey, {
+      global: {
+        fetch: (url, options = {}) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 10000);
+          return fetch(url, { ...options, signal: controller.signal })
+            .finally(() => clearTimeout(timer));
+        },
+      },
+    })
   : null;
 
 // ============================================
