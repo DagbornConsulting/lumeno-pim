@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import Anthropic from '@anthropic-ai/sdk';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
@@ -10,11 +9,33 @@ import multer from 'multer';
 import { db, supabase, isDbConfigured } from './db.js';
 import shopifySync, { SyncWorker } from './shopify.js';
 import shopifyApp from './shopify-app.js';
-import { parseCsvBuffer } from './services/csv-parser.js';
-import { parseExcelBuffer } from './services/excel-parser.js';
-import { autoMapColumns, applyMapping, getMappingStats, SHOPIFY_FIELDS } from './services/column-mapper.js';
 import { processImage, downloadImage, generateAltText, getImageMetadata } from './services/image-processor.js';
 import { feedService } from './feed-generator.js';
+
+// Heavy modules — loaded in the background so they don't block cold-start parsing
+let anthropic = null;
+let parseCsvBuffer = null;
+let parseExcelBuffer = null;
+let autoMapColumns = null, applyMapping = null, getMappingStats = null, SHOPIFY_FIELDS = null;
+
+const _loadHeavyModules = async () => {
+  try {
+    if (process.env.ANTHROPIC_API_KEY) {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    }
+  } catch {}
+  try {
+    ({ parseCsvBuffer } = await import('./services/csv-parser.js'));
+  } catch {}
+  try {
+    ({ parseExcelBuffer } = await import('./services/excel-parser.js'));
+  } catch {}
+  try {
+    ({ autoMapColumns, applyMapping, getMappingStats, SHOPIFY_FIELDS } = await import('./services/column-mapper.js'));
+  } catch {}
+};
+_loadHeavyModules(); // fire-and-forget, runs in background
 
 dotenv.config();
 
@@ -40,13 +61,7 @@ app.use(express.json({ limit: '50mb' }));
 
 // File upload config
 
-// Initialize Anthropic client
-let anthropic = null;
-if (process.env.ANTHROPIC_API_KEY) {
-  anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  });
-}
+// Anthropic and heavy parsers are background-loaded above
 
 // ============================================
 // AUTHENTICATION (User-based with admin/client roles)

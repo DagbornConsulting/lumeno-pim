@@ -1,6 +1,5 @@
-import XLSX from 'xlsx';
-
-export function parseExcelBuffer(buffer, options = {}) {
+export async function parseExcelBuffer(buffer, options = {}) {
+  const { default: XLSX } = await import('xlsx');
   const { sheetIndex = 0, headerRow = 1 } = options;
 
   const workbook = XLSX.read(buffer, { type: 'buffer' });
