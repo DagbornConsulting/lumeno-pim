@@ -297,17 +297,17 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
         id: `v_${Date.now()}`,
         sku: '',
         barcode: '',
-        price: prev.default_price ?? null,
-        compare_at_price: null,
-        cost: prev.default_cost ?? null,
-        inventory_quantity: 0,
+        price: prev.price ?? null,
+        compareAtPrice: null,
+        cost: prev.cost ?? null,
+        inventoryQuantity: 0,
         weight: prev.weight ?? null,
-        option1_name: first.option1_name || null,
-        option1_value: '',
-        option2_name: first.option2_name || null,
-        option2_value: '',
-        option3_name: first.option3_name || null,
-        option3_value: '',
+        option1Name: first.option1Name || null,
+        option1Value: '',
+        option2Name: first.option2Name || null,
+        option2Value: '',
+        option3Name: first.option3Name || null,
+        option3Value: '',
       }]
     }));
   };
@@ -1327,9 +1327,9 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
                   const variants = editedProduct.variants || [];
                   const first = variants[0] || {};
                   const optCols = [
-                    first.option1_name ? { name: first.option1_name, nameField: 'option1_name', valField: 'option1_value' } : null,
-                    first.option2_name ? { name: first.option2_name, nameField: 'option2_name', valField: 'option2_value' } : null,
-                    first.option3_name ? { name: first.option3_name, nameField: 'option3_name', valField: 'option3_value' } : null,
+                    first.option1Name ? { name: first.option1Name, nameField: 'option1Name', valField: 'option1Value' } : null,
+                    first.option2Name ? { name: first.option2Name, nameField: 'option2Name', valField: 'option2Value' } : null,
+                    first.option3Name ? { name: first.option3Name, nameField: 'option3Name', valField: 'option3Value' } : null,
                   ].filter(Boolean);
 
                   return (
@@ -1412,7 +1412,7 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
                                   </td>
                                   <td style={{ padding: '4px 6px' }}>
                                     <input className="form-input" style={{ width: 70, textAlign: 'right' }} type="number"
-                                      value={v.inventory_quantity ?? 0} onChange={e => handleVariantChange(v.id, 'inventory_quantity', Number(e.target.value))} />
+                                      value={v.inventoryQuantity ?? 0} onChange={e => handleVariantChange(v.id, 'inventoryQuantity', Number(e.target.value))} />
                                   </td>
                                   <td style={{ padding: '4px 6px' }}>
                                     <button
