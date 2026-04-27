@@ -1223,53 +1223,72 @@ app.post('/api/source/scrape-images', async (req, res) => {
 
     // Extract base URL for resolving relative paths
     const baseUrl = new URL(url);
+    const NOISE_PATH = /\/(icon|logo|arrow|banner|flag|pixel|spacer|sprite)/i;
+    const IMAGE_EXT = /\.(jpe?g|png|webp|avif)(\?|$)/i;
 
-    // Find all img tags
-    const imgMatches = [...html.matchAll(/<img[^>]+>/gi)];
-    const allImages = [];
-    for (const match of imgMatches) {
+    const resolveUrl = (raw) => {
+      if (!raw || raw.startsWith('data:')) return null;
+      try {
+        if (raw.startsWith('//')) return baseUrl.protocol + raw;
+        if (raw.startsWith('/')) return baseUrl.origin + raw;
+        if (raw.startsWith('http')) return raw;
+        return baseUrl.href.replace(/\/[^/]*$/, '/') + raw;
+      } catch { return null; }
+    };
+
+    // Map<identity, bestVariant> — collapses CDN-resized duplicates of the same
+    // source image (e.g. /storage/webp/720-720-… vs /media/{guid}/{file}) so we
+    // surface one entry per logical image at the highest available resolution.
+    const byIdentity = new Map();
+    const addCandidate = (imgUrl, altText, titleText, source) => {
+      if (!imgUrl) return;
+      if (/\.(svg|gif)$/i.test(imgUrl)) return;
+      if (NOISE_PATH.test(imgUrl)) return;
+      const id = imageIdentity(imgUrl);
+      const score = imageVariantScore({ url: imgUrl, source });
+      const existing = byIdentity.get(id);
+      if (existing && existing._score >= score) return;
+      const filename = decodeURIComponent(imgUrl.split('/').pop().split('?')[0]);
+      const filenameBase = filename.replace(/\.[^.]+$/, '');
+      const searchText = `${filename} ${filenameBase} ${altText} ${titleText}`.toLowerCase();
+      byIdentity.set(id, { url: imgUrl, filename, filenameBase, altText, titleText, searchText, _score: score });
+    };
+
+    // <a data-src="..."> — click-to-enlarge / gallery lightbox links typically
+    // point to the original full-resolution file.
+    for (const m of html.matchAll(/<a[^>]+data-src=["']([^"']+)["'][^>]*>/gi)) {
+      const u = resolveUrl(m[1]);
+      if (u && IMAGE_EXT.test(u)) addCandidate(u, '', '', 'gallery');
+    }
+
+    // <img> tags — prefer data-src (lazy) over srcset over src
+    for (const match of html.matchAll(/<img[^>]+>/gi)) {
       const tag = match[0];
       const srcMatch = tag.match(/src=["']([^"']+)["']/i);
+      const dataSrcMatch = tag.match(/data-src=["']([^"']+)["']/i);
       const srcsetMatch = tag.match(/srcset=["']([^"']+)["']/i);
       const altMatch = tag.match(/alt=["']([^"']*?)["']/i);
       const titleMatch = tag.match(/title=["']([^"']*?)["']/i);
-      if (!srcMatch) continue;
-
-      let imgUrl = srcMatch[1];
-      // Resolve relative URLs
-      if (imgUrl.startsWith('//')) imgUrl = baseUrl.protocol + imgUrl;
-      else if (imgUrl.startsWith('/')) imgUrl = baseUrl.origin + imgUrl;
-      else if (!imgUrl.startsWith('http')) imgUrl = baseUrl.href.replace(/\/[^/]*$/, '/') + imgUrl;
-
-      // Skip tiny icons, spacers, SVGs, data URIs
-      if (imgUrl.startsWith('data:')) continue;
-      if (/\.(svg|gif)$/i.test(imgUrl)) continue;
-      if (/\/(icon|logo|arrow|banner|flag|pixel|spacer|sprite)/i.test(imgUrl)) continue;
-
-      // Get srcset largest if available
-      let bestUrl = imgUrl;
-      if (srcsetMatch) {
-        const srcsetParts = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
-        const largest = srcsetParts.sort((a, b) => parseInt(b[1]) - parseInt(a[1]))[0];
-        if (largest?.[0]) bestUrl = largest[0].startsWith('http') ? largest[0] : baseUrl.origin + largest[0];
-      }
-
-      const filename = decodeURIComponent(bestUrl.split('/').pop().split('?')[0]);
-      const filenameBase = filename.replace(/\.[^.]+$/, ''); // without extension
       const altText = altMatch?.[1] || '';
       const titleText = titleMatch?.[1] || '';
-      const searchText = `${filename} ${filenameBase} ${altText} ${titleText}`.toLowerCase();
 
-      allImages.push({ url: bestUrl, filename, filenameBase, altText, titleText, searchText });
+      if (dataSrcMatch) {
+        const u = resolveUrl(dataSrcMatch[1]);
+        if (u && IMAGE_EXT.test(u)) { addCandidate(u, altText, titleText, 'gallery'); continue; }
+      }
+      if (srcsetMatch) {
+        const parts = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
+        const largest = parts.sort((a, b) => parseInt(b[1]) - parseInt(a[1]))[0];
+        const u = largest?.[0] ? resolveUrl(largest[0]) : null;
+        if (u) { addCandidate(u, altText, titleText, 'img'); continue; }
+      }
+      if (srcMatch) {
+        const u = resolveUrl(srcMatch[1]);
+        if (u) addCandidate(u, altText, titleText, 'img');
+      }
     }
 
-    // Dedup by URL
-    const seen = new Set();
-    const unique = allImages.filter(img => {
-      if (seen.has(img.url)) return false;
-      seen.add(img.url);
-      return true;
-    });
+    const unique = [...byIdentity.values()].map(({ _score, ...img }) => img);
 
     // Score each image against product identifiers
     const skuClean = (sku || '').toLowerCase().replace(/[-_\s]/g, '');
@@ -1319,6 +1338,58 @@ app.post('/api/source/scrape-images', async (req, res) => {
   }
 });
 
+// Canonical identity for an image URL — variants of the same logical image
+// (different sizes, formats or CDN transformer paths) collapse to the same key.
+function imageIdentity(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+
+    // Strong signal: many CDNs (e.g. affariofsweden, Episerver-style media stores)
+    // expose an immutable /media/{guid}/{filename} segment that's identical across
+    // all rendered variants. Use that as the key when present and drop the file
+    // extension so .jpg/.jpeg/.webp variants of the same source collapse.
+    const mediaMatch = u.pathname.match(/\/media\/([a-f0-9-]{16,}\/[^/]+)$/i);
+    if (mediaMatch) {
+      return 'media/' + mediaMatch[1].replace(/\.[a-z0-9]+$/i, '').toLowerCase();
+    }
+
+    // Generic fallback: strip common size suffixes from the filename and known
+    // size query params. Catches Shopify (foo_300x.jpg), WooCommerce
+    // (foo-300x300.jpg), and most ?width=/?w= patterns.
+    const segs = u.pathname.split('/');
+    const last = segs[segs.length - 1];
+    const extMatch = last.match(/\.[a-z0-9]+$/i);
+    const ext = extMatch ? extMatch[0] : '';
+    const base = last.slice(0, last.length - ext.length);
+    const stripped = base.replace(
+      /[_-](\d+x\d+|\d+x|x\d+|thumb(?:nail)?|small|medium|large|grande|compact|tiny|mini)$/i,
+      ''
+    );
+    segs[segs.length - 1] = stripped + ext;
+
+    const params = new URLSearchParams(u.search);
+    ['width', 'w', 'h', 'height', 'size', 'v', 't'].forEach(k => params.delete(k));
+    const q = params.toString();
+    return (u.host + segs.join('/') + (q ? '?' + q : '')).toLowerCase();
+  } catch {
+    return rawUrl;
+  }
+}
+
+// Higher score = preferred variant when multiple URLs share an identity.
+function imageVariantScore({ url, source, width }) {
+  let s = 0;
+  if (source === 'gallery') s += 100;
+  if (/\/storage\/webp\//i.test(url)) s -= 50;
+  if (/\/(thumb|thumbnail|small|tiny)\//i.test(url)) s -= 30;
+  // CDN size-transformer pattern in path, e.g. .../720-720-0-png.../ or .../300x300/
+  if (/\/\d{2,4}-\d{2,4}-\d/i.test(url) || /\/\d{2,4}x\d{2,4}\//i.test(url)) s -= 30;
+  // size suffix on filename, e.g. foo_300x300.jpg or Shopify foo_300x.jpg
+  if (/[_-]\d{2,4}x\d{0,4}\./i.test(url)) s -= 20;
+  if (width) s += Math.min(parseInt(width) || 0, 5000) / 100;
+  return s;
+}
+
 // Helper: extract and resolve images from HTML
 function extractImages(html, pageUrl) {
   const baseUrl = new URL(pageUrl);
@@ -1335,20 +1406,25 @@ function extractImages(html, pageUrl) {
     } catch { return null; }
   };
 
-  const seen = new Set();
-  const images = [];
+  // Map<identity, bestVariant> — replaces an exact-URL Set so that compressed
+  // CDN variants (webp transformers, _300x suffixes, ?width=) of the same source
+  // image collapse into one entry instead of being kept as duplicates.
+  const byIdentity = new Map();
 
   // source: 'gallery' = <a data-src> or <img data-src> (explicit gallery/lazy pattern)
   //         'img'     = plain <img src> (may include site furniture)
-  const addImage = (url, altText = '', source = 'img') => {
-    if (!url || seen.has(url)) return;
+  const addImage = (url, altText = '', source = 'img', width = null) => {
+    if (!url) return;
     if (/\.(svg|gif)$/i.test(url)) return;
     if (NOISE_PATH.test(url)) return;
-    seen.add(url);
+    const id = imageIdentity(url);
+    const score = imageVariantScore({ url, source, width });
+    const existing = byIdentity.get(id);
+    if (existing && existing._score >= score) return;
     const filename = decodeURIComponent(url.split('/').pop().split('?')[0]);
     const filenameBase = filename.replace(/\.[^.]+$/, '');
     const searchText = `${filename} ${filenameBase} ${altText}`.toLowerCase();
-    images.push({ url, filename, altText, searchText, source });
+    byIdentity.set(id, { url, filename, altText, searchText, source, _score: score });
   };
 
   // <a data-src="..."> — click-to-enlarge / gallery lightbox pattern
@@ -1364,25 +1440,27 @@ function extractImages(html, pageUrl) {
     const dataSrcMatch = tag.match(/data-src=["']([^"']+)["']/i);
     const srcsetMatch = tag.match(/srcset=["']([^"']+)["']/i);
     const altMatch = tag.match(/alt=["']([^"']*?)["']/i);
+    const widthMatch = tag.match(/\bwidth=["']?(\d+)/i);
     const altText = altMatch?.[1] || '';
+    const width = widthMatch?.[1] || null;
 
     if (dataSrcMatch) {
       const u = resolveUrl(dataSrcMatch[1]);
-      if (u && IMAGE_EXT.test(u)) { addImage(u, altText, 'gallery'); continue; }
+      if (u && IMAGE_EXT.test(u)) { addImage(u, altText, 'gallery', width); continue; }
     }
     if (srcsetMatch) {
       const parts = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
       const largest = parts.sort((a, b) => parseInt(b[1]) - parseInt(a[1]))[0];
       const u = largest?.[0] ? resolveUrl(largest[0]) : null;
-      if (u && IMAGE_EXT.test(u)) { addImage(u, altText, 'img'); continue; }
+      if (u && IMAGE_EXT.test(u)) { addImage(u, altText, 'img', width); continue; }
     }
     if (srcMatch) {
       const u = resolveUrl(srcMatch[1]);
-      if (u) addImage(u, altText, 'img');
+      if (u) addImage(u, altText, 'img', width);
     }
   }
 
-  return images;
+  return [...byIdentity.values()].map(({ _score, ...img }) => img);
 }
 
 // Helper: score image against a product (SKU/barcode only)
