@@ -1066,16 +1066,18 @@ ${combinedSource ? `\n=== KÄLLMATERIAL (använd för fakta — hitta aldrig på
     let maxTokens = 2048;
 
     if (field === 'all') {
-      maxTokens = 4096;
-      prompt = `Generera ALLT AI-innehåll för denna produkt. ${productContext}
+      maxTokens = 8192;
+      prompt = `Generera ALLT AI-innehåll för denna produkt i ett svep — beskrivning, ingress, snabbfakta, specs, FAQ, användningsområden, SEO. Använd visuell info från bifogade bilder, källmaterial och befintlig produktdata. ${productContext}
 
-Svara ENBART med JSON:
+Svara ENBART med JSON (inga kommentarer, ingen markdown):
 {
-  "agentSummary": "6-8 punkter i köpordning, en per rad",
-  "shortDescription": "2-3 säljande meningar, löptext",
+  "description": "Huvudbeskrivning som HTML. Benefit-driven, >150 ord. Använd <p>, <ul><li>, <strong>. Inga <h1>/<h2>. Ingen platshållartext.",
+  "intro": "Kort ingress, 1-2 meningar, säljande hook. Ska komplettera beskrivningen, inte upprepa snabbfakta.",
+  "agentSummary": "6-8 punkter i köpordning (viktigast först), en per rad, löptext som AI-agenter kan parsa.",
+  "shortDescription": "2-3 säljande meningar löptext. Nyttobaserad. Ska INTE upprepa snabbfakta eller ingress.",
   "specifications": [{"name": "Attributnamn", "value": "Värde"}],
   "faq": [{"question": "Fråga", "answer": "Svar 2-4 meningar"}],
-  "useCases": "Användningsområden, vem produkten passar för",
+  "useCases": "Användningsområden, vem produkten passar för, i vilka situationer.",
   "seoTitle": "Max 60 tecken SEO-titel",
   "seoDescription": "Max 155 tecken meta description",
   "searchTerms": "kommaseparerade söktermer och synonymer",

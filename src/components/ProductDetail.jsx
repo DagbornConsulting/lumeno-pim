@@ -446,6 +446,7 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
       if (field === 'all' && typeof data.result === 'object') {
         setEditedProduct(prev => ({
           ...prev,
+          description: data.result.description || prev.description,
           agentSummary: data.result.agentSummary || prev.agentSummary,
           shortDescription: data.result.shortDescription || prev.shortDescription,
           specifications: data.result.specifications || prev.specifications,
@@ -455,6 +456,10 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
           seoDescription: data.result.seoDescription || prev.seoDescription,
           searchTerms: data.result.searchTerms || prev.searchTerms,
           tags: data.result.tags || prev.tags,
+          // Kort ingress lagras som metafält (inte egen kolumn)
+          metafields: data.result.intro
+            ? { ...prev.metafields, 'custom.kort_produktbeskrivning': data.result.intro }
+            : prev.metafields,
         }));
       } else if (field === 'specifications' || field === 'faq') {
         if (Array.isArray(data.result)) {
