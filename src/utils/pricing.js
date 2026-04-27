@@ -49,8 +49,11 @@ export function computePricing({ cost, margin, supplierFeePercent = 0, vatRate =
   const profit = salePriceExVat - trueCost;
   const marginPct = salePriceExVat > 0 ? profit / salePriceExVat : 0;
 
+  // salePriceInclVat is the value that gets stored on the product / synced to
+  // Shopify, so it must be a whole krona — no öres in product prices.
+  // Reporting fields (ex VAT, profit, margin) keep cent precision.
   return {
-    salePriceInclVat: round2(salePriceInclVat),
+    salePriceInclVat: Math.round(salePriceInclVat),
     salePriceExVat: round2(salePriceExVat),
     trueCost: round2(trueCost),
     profit: round2(profit),

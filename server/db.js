@@ -54,6 +54,27 @@ export const supabase = supabaseClient
 // Check if database is configured
 export const isDbConfigured = () => !!(supabase || pool);
 
+// Round to whole krona — product prices in PIM and Shopify must be integers.
+const roundPrice = (v) => {
+  if (v == null || v === '') return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n) : v;
+};
+
+const PRODUCT_PRICE_FIELDS = ['default_price', 'default_compare_at_price'];
+const VARIANT_PRICE_FIELDS = ['price', 'compare_at_price'];
+
+// Round any present price fields on a product/variant payload, leaving other
+// fields untouched. Used at the DB write boundary to guarantee whole prices.
+const withRoundedPrices = (obj, fields) => {
+  if (!obj) return obj;
+  const out = { ...obj };
+  for (const f of fields) {
+    if (Object.prototype.hasOwnProperty.call(out, f)) out[f] = roundPrice(out[f]);
+  }
+  return out;
+};
+
 // ============================================
 // DATABASE HELPER FUNCTIONS
 // ============================================
@@ -308,7 +329,8 @@ export const db = {
   async createProduct(product) {
     if (!supabase) throw new Error('Supabase not configured');
 
-    const { variants, images, ...productData } = product;
+    const { variants, images, ...rawProductData } = product;
+    const productData = withRoundedPrices(rawProductData, PRODUCT_PRICE_FIELDS);
 
     console.log('DB: Creating product with data:', JSON.stringify(productData, null, 2));
 
@@ -329,7 +351,7 @@ export const db = {
     // Insert variants
     if (variants?.length) {
       const variantsWithProductId = variants.map((v, idx) => ({
-        ...v,
+        ...withRoundedPrices(v, VARIANT_PRICE_FIELDS),
         product_id: newProduct.id,
         position: idx + 1
       }));
@@ -362,7 +384,8 @@ export const db = {
   async updateProduct(id, updates) {
     if (!supabase) throw new Error('Supabase not configured');
 
-    const { variants, images, ...productData } = updates;
+    const { variants, images, ...rawProductData } = updates;
+    const productData = withRoundedPrices(rawProductData, PRODUCT_PRICE_FIELDS);
 
     // Update product
     const { error: productError } = await supabase
@@ -383,7 +406,7 @@ export const db = {
           // Remove id field completely to avoid constraint violations
           const { id: _unusedId, ...variantWithoutId } = v;
           return {
-            ...variantWithoutId,
+            ...withRoundedPrices(variantWithoutId, VARIANT_PRICE_FIELDS),
             product_id: id,
             position: idx + 1
           };
