@@ -1379,6 +1379,7 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'url krävs' });
   if (!storeId) return res.status(400).json({ error: 'storeId krävs' });
   const productLimit = maxProducts ? parseInt(maxProducts) : null;
+  console.log('[bulk-scrape] productLimit=', productLimit, 'maxProducts=', maxProducts);
 
   // SSE setup
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1505,6 +1506,11 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
           if (productMap.get(pid).images.size !== prevSize) {
             const images = [...productMap.get(pid).images.values()].sort((a, b) => b.score - a.score);
             send({ type: 'match', product: pageProduct, images });
+          }
+
+          // Stop crawl immediately when product limit is reached
+          if (productLimit && productMap.size >= productLimit) {
+            aborted = true;
           }
         } else {
           // Category page or no match — mark images as seen but don't assign them
