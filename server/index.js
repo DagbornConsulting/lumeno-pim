@@ -1374,10 +1374,11 @@ function scoreImage(img, product) {
 
 // Bulk image scrape: crawl entire site (SSE streaming)
 app.post('/api/images/bulk-scrape', async (req, res) => {
-  const { url } = req.body;
+  const { url, maxProducts } = req.body;
   const storeId = await resolveStoreId(req);
   if (!url) return res.status(400).json({ error: 'url krävs' });
   if (!storeId) return res.status(400).json({ error: 'storeId krävs' });
+  const productLimit = maxProducts ? parseInt(maxProducts) : null;
 
   // SSE setup
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1425,7 +1426,7 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
     let imagesScanned = 0;
     const startTime = Date.now();
 
-    while (queue.length && (Date.now() - startTime) < MAX_TIME_MS && !aborted) {
+    while (queue.length && (Date.now() - startTime) < MAX_TIME_MS && !aborted && !(productLimit && productMap.size >= productLimit)) {
       const pageUrl = queue.shift();
       pagesScanned++;
 

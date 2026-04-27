@@ -10,6 +10,8 @@ export default function ImageImportView() {
   const [result, setResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [applyResult, setApplyResult] = useState(null);
+  const [testMode, setTestMode] = useState(true);
+  const [testLimit, setTestLimit] = useState(3);
   const abortRef = useRef(null);
   const liveMatchesRef = useRef([]); // accumulates matches during crawl for mid-crawl save
 
@@ -41,7 +43,7 @@ export default function ImageImportView() {
       const res = await fetch(`${API_URL}/images/bulk-scrape`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: url.trim(), maxProducts: testMode ? testLimit : null }),
         signal: controller.signal,
       });
 
@@ -125,6 +127,40 @@ export default function ImageImportView() {
         Ange en leverantörs webbplats. Crawlern följer alla sidor automatiskt och matchar bilder mot
         produkter via SKU och streckkod. Matchade bilder sparas direkt.
       </p>
+
+      {/* Test mode toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px', padding: '12px 16px', background: testMode ? '#fefce8' : '#f9fafb', border: `1px solid ${testMode ? '#fde68a' : '#e5e7eb'}`, borderRadius: '8px' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={testMode}
+            onChange={e => setTestMode(e.target.checked)}
+            disabled={isBusy}
+            style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+          />
+          <span style={{ fontWeight: 600, fontSize: '14px', color: testMode ? '#92400e' : '#374151' }}>
+            Testläge
+          </span>
+        </label>
+        {testMode && (
+          <>
+            <span style={{ fontSize: '13px', color: '#78350f' }}>— stoppa efter</span>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={testLimit}
+              onChange={e => setTestLimit(Math.max(1, parseInt(e.target.value) || 1))}
+              disabled={isBusy}
+              style={{ width: '60px', padding: '4px 8px', border: '1px solid #fcd34d', borderRadius: '6px', fontSize: '14px', fontWeight: 600, textAlign: 'center' }}
+            />
+            <span style={{ fontSize: '13px', color: '#78350f' }}>matchade produkter</span>
+          </>
+        )}
+        {!testMode && (
+          <span style={{ fontSize: '13px', color: '#6b7280' }}>Kör på alla {'>'}1500 produkter — kontrollera testläget först</span>
+        )}
+      </div>
 
       {/* URL input */}
       <div style={{ display: 'flex', gap: '10px', marginBottom: '28px' }}>
