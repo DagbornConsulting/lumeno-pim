@@ -3,24 +3,41 @@ import { Search, CheckCircle, Loader2, Image, X, Globe } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
+// Build initial selection: tick anything with score >= 80 (SKU/barcode match),
+// leave score 70 (path-prefix fallback) for manual review.
+const buildDefaultSelection = (matches) => {
+  const sel = new Set();
+  for (const m of matches) {
+    for (const img of m.images) {
+      if (img.score >= 80) sel.add(`${m.product.id}::${img.url}`);
+    }
+  }
+  return sel;
+};
+
 export default function ImageImportView() {
   const [url, setUrl] = useState('');
-  const [status, setStatus] = useState('idle'); // idle | crawling | applying | done | error
+  const [status, setStatus] = useState('idle'); // idle | crawling | reviewing | applying | done | error
   const [progress, setProgress] = useState(null); // { page, queued, url, matched, elapsed }
   const [result, setResult] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [applyResult, setApplyResult] = useState(null);
   const [testMode, setTestMode] = useState(true);
   const [testLimit, setTestLimit] = useState(3);
+  const [selectedImages, setSelectedImages] = useState(new Set()); // Set<"productId::url">
   const abortRef = useRef(null);
   const liveMatchesRef = useRef([]); // accumulates matches during crawl for mid-crawl save
+
+  const enterReview = (snapshot) => {
+    setResult({ autoMatched: snapshot, pagesScanned: progress?.page || 0, imagesScanned: progress?.queued || 0 });
+    setSelectedImages(buildDefaultSelection(snapshot));
+    setStatus('reviewing');
+  };
 
   const handleStop = async (save) => {
     abortRef.current?.abort();
     if (save && liveMatchesRef.current.length) {
-      const snapshot = [...liveMatchesRef.current];
-      setResult({ autoMatched: snapshot, pagesScanned: progress?.page || 0, imagesScanned: progress?.queued || 0 });
-      await applyMatches(snapshot);
+      enterReview([...liveMatchesRef.current]);
     } else {
       setStatus('idle');
       setProgress(null);
@@ -76,11 +93,11 @@ export default function ImageImportView() {
               if (idx >= 0) liveMatchesRef.current[idx] = { product: event.product, images: event.images };
               else liveMatchesRef.current.push({ product: event.product, images: event.images });
             } else if (event.type === 'done') {
-              setResult(event);
-              setStatus('done');
-              // Auto-apply all matched
               if (event.autoMatched?.length) {
-                await applyMatches(event.autoMatched);
+                enterReview(event.autoMatched);
+              } else {
+                setResult(event);
+                setStatus('done');
               }
             } else if (event.type === 'error') {
               throw new Error(event.message);
@@ -116,8 +133,43 @@ export default function ImageImportView() {
     }
   };
 
+  const toggleImage = (productId, url) => {
+    setSelectedImages(prev => {
+      const next = new Set(prev);
+      const key = `${productId}::${url}`;
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleProduct = (productId, images, allChecked) => {
+    setSelectedImages(prev => {
+      const next = new Set(prev);
+      for (const img of images) {
+        const key = `${productId}::${img.url}`;
+        if (allChecked) next.delete(key); else next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const applySelected = async () => {
+    const filtered = (result?.autoMatched || [])
+      .map(m => ({
+        product: m.product,
+        images: m.images.filter(img => selectedImages.has(`${m.product.id}::${img.url}`)),
+      }))
+      .filter(m => m.images.length > 0);
+    if (!filtered.length) return;
+    await applyMatches(filtered);
+  };
+
+  const selectedImageCount = selectedImages.size;
+  const selectedProductCount = new Set([...selectedImages].map(k => k.split('::')[0])).size;
+
   const isCrawling = status === 'crawling';
   const isApplying = status === 'applying';
+  const isReviewing = status === 'reviewing';
   const isBusy = isCrawling || isApplying;
 
   return (
@@ -249,7 +301,7 @@ export default function ImageImportView() {
       )}
 
       {/* Apply result */}
-      {applyResult && (
+      {applyResult && status === 'done' && (
         <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: '8px', padding: '12px 16px', marginBottom: '20px', color: '#15803d', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px' }}>
           <CheckCircle size={16} />
           <strong>{applyResult.applied} bilder</strong>&nbsp;sparades på produkter
@@ -257,14 +309,42 @@ export default function ImageImportView() {
         </div>
       )}
 
+      {/* Review apply bar */}
+      {isReviewing && (
+        <div style={{ position: 'sticky', top: 0, zIndex: 10, background: '#fff', borderBottom: '1px solid #e5e7eb', padding: '12px 0', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ flex: 1, fontSize: '14px', color: '#374151' }}>
+            <strong>{selectedImageCount}</strong> bild{selectedImageCount !== 1 ? 'er' : ''} valda på <strong>{selectedProductCount}</strong> produkt{selectedProductCount !== 1 ? 'er' : ''}
+            <span style={{ color: '#6b7280', marginLeft: '8px' }}>
+              · score 80+ är förvalda, 70 (path-prefix) kräver bekräftelse
+            </span>
+          </div>
+          <button
+            onClick={applySelected}
+            disabled={selectedImageCount === 0}
+            style={{ padding: '10px 20px', background: selectedImageCount ? '#16a34a' : '#9ca3af', color: '#fff', border: 'none', borderRadius: '8px', cursor: selectedImageCount ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 500, fontSize: '14px' }}
+          >
+            <CheckCircle size={15} /> Spara valda bilder
+          </button>
+        </div>
+      )}
+
       {/* Results list */}
-      {result?.autoMatched?.length > 0 && (
+      {(isReviewing || status === 'done') && result?.autoMatched?.length > 0 && (
         <section>
           <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '12px', color: '#15803d', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <CheckCircle size={16} /> Matchade produkter ({result.autoMatched.length})
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            {result.autoMatched.map(m => <ProductRow key={m.product.id} match={m} />)}
+            {result.autoMatched.map(m => (
+              <ProductRow
+                key={m.product.id}
+                match={m}
+                selectable={isReviewing}
+                selected={selectedImages}
+                onToggleImage={toggleImage}
+                onToggleProduct={toggleProduct}
+              />
+            ))}
           </div>
         </section>
       )}
@@ -299,44 +379,74 @@ function StatCard({ label, value, color = '#374151', icon }) {
   );
 }
 
-function ProductRow({ match }) {
+function scoreColor(score) {
+  if (score >= 100) return '#15803d';
+  if (score >= 80)  return '#16a34a';
+  if (score >= 70)  return '#ca8a04';
+  return '#9ca3af';
+}
+
+function ProductRow({ match, selectable = false, selected = new Set(), onToggleImage, onToggleProduct }) {
   const { product, images } = match;
+  const checkedCount = selectable ? images.filter(img => selected.has(`${product.id}::${img.url}`)).length : images.length;
+  const allChecked = selectable && checkedCount === images.length;
+  const someChecked = selectable && checkedCount > 0 && !allChecked;
   return (
     <div style={{
       background: '#f0fdf4', border: '1px solid #bbf7d0',
       borderRadius: '8px', padding: '10px 14px',
       display: 'flex', alignItems: 'center', gap: '14px',
     }}>
+      {selectable && (
+        <input
+          type="checkbox"
+          checked={allChecked}
+          ref={el => { if (el) el.indeterminate = someChecked; }}
+          onChange={() => onToggleProduct(product.id, images, allChecked)}
+          style={{ width: 16, height: 16, cursor: 'pointer', flexShrink: 0 }}
+        />
+      )}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 500, fontSize: '14px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {product.title}
         </div>
         <div style={{ fontSize: '12px', color: '#6b7280' }}>SKU: {product.sku || '—'}</div>
       </div>
-      <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
-        {images.slice(0, 6).map((img, i) => (
-          <div key={i} style={{ position: 'relative' }}>
-            <img
-              src={img.url} alt=""
-              style={{ width: 52, height: 52, objectFit: 'cover', borderRadius: 6, border: '1px solid #e5e7eb', display: 'block' }}
-              onError={e => { e.target.style.opacity = '0.15'; }}
-            />
-            <span style={{
-              position: 'absolute', bottom: 2, right: 2,
-              background: img.score === 100 ? '#15803d' : '#16a34a',
-              color: '#fff', fontSize: '9px', fontWeight: 700, borderRadius: 3, padding: '1px 3px',
-            }}>{img.score}</span>
-          </div>
-        ))}
-        {images.length > 6 && (
-          <div style={{ width: 52, height: 52, background: '#f1f5f9', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', color: '#6b7280' }}>
-            +{images.length - 6}
-          </div>
-        )}
+      <div style={{ display: 'flex', gap: '6px', flexShrink: 0, flexWrap: 'wrap', maxWidth: '60%', justifyContent: 'flex-end' }}>
+        {images.map((img, i) => {
+          const key = `${product.id}::${img.url}`;
+          const isChecked = selectable ? selected.has(key) : true;
+          return (
+            <label
+              key={i}
+              title={`${img.matchReason} · ${img.filename}`}
+              style={{ position: 'relative', cursor: selectable ? 'pointer' : 'default', display: 'block' }}
+            >
+              <img
+                src={img.url} alt=""
+                style={{ width: 52, height: 52, objectFit: 'cover', borderRadius: 6, border: `2px solid ${isChecked ? '#16a34a' : '#e5e7eb'}`, display: 'block', opacity: isChecked ? 1 : 0.5 }}
+                onError={e => { e.target.style.opacity = '0.15'; }}
+              />
+              {selectable && (
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => onToggleImage(product.id, img.url)}
+                  style={{ position: 'absolute', top: 2, left: 2, width: 14, height: 14, cursor: 'pointer', accentColor: '#16a34a' }}
+                />
+              )}
+              <span style={{
+                position: 'absolute', bottom: 2, right: 2,
+                background: scoreColor(img.score),
+                color: '#fff', fontSize: '9px', fontWeight: 700, borderRadius: 3, padding: '1px 3px',
+              }}>{img.score}</span>
+            </label>
+          );
+        })}
       </div>
       <div style={{ fontSize: '12px', color: '#6b7280', flexShrink: 0, textAlign: 'right', minWidth: '80px' }}>
         <div style={{ fontWeight: 500, color: '#374151' }}>{images[0]?.matchReason}</div>
-        <div>{images.length} bild{images.length !== 1 ? 'er' : ''}</div>
+        <div>{selectable ? `${checkedCount} / ${images.length}` : `${images.length} bild${images.length !== 1 ? 'er' : ''}`}</div>
       </div>
     </div>
   );

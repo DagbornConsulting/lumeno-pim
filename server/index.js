@@ -1599,14 +1599,6 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
               }
             }
 
-            // On a confirmed product page: gallery-linked images (data-src / lightbox)
-            // are likely lifestyle/alternate shots — include them at a lower score.
-            // Plain <img src> images are skipped here because they include site furniture
-            // (language flags, related-product thumbnails, etc.)
-            if (finalScore === 0 && img.source === 'gallery') {
-              finalScore = 50; finalReason = `Produktsida - galleribild (${pageReason})`;
-            }
-
             if (finalScore > 0) {
               const existing = productMap.get(pid).images.get(img.url);
               if (!existing || finalScore > existing.score) {
