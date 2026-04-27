@@ -28,7 +28,7 @@ import './components/PriceManager.css';
 import './components/MarginEngine.css';
 import './App.css';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 export default function App() {
   // Auth state - check localStorage immediately
@@ -1620,8 +1620,8 @@ function FeedsView({ stores }) {
   const [previews, setPreviews] = useState({});
   const [copiedId, setCopiedId] = useState(null);
 
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
-  const BASE_URL = import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:3001';
+  const API_URL = import.meta.env.VITE_API_URL || '/api';
+  const BASE_URL = import.meta.env.VITE_API_URL?.replace('/api', '') || '';
 
   useEffect(() => {
     if (selectedStore) loadFeeds();
@@ -2192,7 +2192,7 @@ function PublishModal({ onClose, stores, selectedCount, selectedProductIds, onPu
       const productId = selectedProductIds[i];
 
       try {
-        const response = await fetch(`http://localhost:3001/api/db/products/${productId}/publish`, {
+        const response = await fetch(`/api/db/products/${productId}/publish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ storeIds: selectedStores })

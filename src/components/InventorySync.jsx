@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, RefreshCw, CheckCircle2, ArrowUp, ArrowDown, Minus } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 export default function InventorySync() {
   const [storeId, setStoreId] = useState(null);

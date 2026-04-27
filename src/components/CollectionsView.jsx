@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import './CollectionsView.css';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 function generateHandle(title) {
   return title.toLowerCase().replace(/[åä]/g, 'a').replace(/[ö]/g, 'o').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');

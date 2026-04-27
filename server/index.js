@@ -1322,40 +1322,66 @@ app.post('/api/source/scrape-images', async (req, res) => {
 // Helper: extract and resolve images from HTML
 function extractImages(html, pageUrl) {
   const baseUrl = new URL(pageUrl);
-  const imgMatches = [...html.matchAll(/<img[^>]+>/gi)];
+  const IMAGE_EXT = /\.(jpe?g|png|webp|avif)(\?|$)/i;
+  const NOISE_PATH = /\/(icon|logo|arrow|banner|flag|pixel|spacer|sprite|placeholder)/i;
+
+  const resolveUrl = (raw) => {
+    if (!raw || raw.startsWith('data:')) return null;
+    try {
+      if (raw.startsWith('//')) return baseUrl.protocol + raw;
+      if (raw.startsWith('/')) return baseUrl.origin + raw;
+      if (raw.startsWith('http')) return raw;
+      return baseUrl.href.replace(/\/[^/]*$/, '/') + raw;
+    } catch { return null; }
+  };
+
+  const seen = new Set();
   const images = [];
-  for (const match of imgMatches) {
-    const tag = match[0];
+
+  // source: 'gallery' = <a data-src> or <img data-src> (explicit gallery/lazy pattern)
+  //         'img'     = plain <img src> (may include site furniture)
+  const addImage = (url, altText = '', source = 'img') => {
+    if (!url || seen.has(url)) return;
+    if (/\.(svg|gif)$/i.test(url)) return;
+    if (NOISE_PATH.test(url)) return;
+    seen.add(url);
+    const filename = decodeURIComponent(url.split('/').pop().split('?')[0]);
+    const filenameBase = filename.replace(/\.[^.]+$/, '');
+    const searchText = `${filename} ${filenameBase} ${altText}`.toLowerCase();
+    images.push({ url, filename, altText, searchText, source });
+  };
+
+  // <a data-src="..."> — click-to-enlarge / gallery lightbox pattern
+  for (const m of html.matchAll(/<a[^>]+data-src=["']([^"']+)["'][^>]*>/gi)) {
+    const url = resolveUrl(m[1]);
+    if (url && IMAGE_EXT.test(url)) addImage(url, '', 'gallery');
+  }
+
+  // <img> tags — prefer data-src (lazy) over srcset over src
+  for (const m of html.matchAll(/<img[^>]+>/gi)) {
+    const tag = m[0];
     const srcMatch = tag.match(/src=["']([^"']+)["']/i);
+    const dataSrcMatch = tag.match(/data-src=["']([^"']+)["']/i);
     const srcsetMatch = tag.match(/srcset=["']([^"']+)["']/i);
     const altMatch = tag.match(/alt=["']([^"']*?)["']/i);
-    if (!srcMatch) continue;
+    const altText = altMatch?.[1] || '';
 
-    let imgUrl = srcMatch[1];
-    if (imgUrl.startsWith('data:') || imgUrl.startsWith('//')) {
-      if (imgUrl.startsWith('//')) imgUrl = baseUrl.protocol + imgUrl;
-      else continue;
-    } else if (imgUrl.startsWith('/')) imgUrl = baseUrl.origin + imgUrl;
-    else if (!imgUrl.startsWith('http')) imgUrl = baseUrl.href.replace(/\/[^/]*$/, '/') + imgUrl;
-
-    if (/\.(svg|gif)$/i.test(imgUrl)) continue;
-    if (/\/(icon|logo|arrow|banner|flag|pixel|spacer|sprite|placeholder)/i.test(imgUrl)) continue;
-
-    // Prefer srcset largest
-    let bestUrl = imgUrl;
+    if (dataSrcMatch) {
+      const u = resolveUrl(dataSrcMatch[1]);
+      if (u && IMAGE_EXT.test(u)) { addImage(u, altText, 'gallery'); continue; }
+    }
     if (srcsetMatch) {
       const parts = srcsetMatch[1].split(',').map(s => s.trim().split(/\s+/));
       const largest = parts.sort((a, b) => parseInt(b[1]) - parseInt(a[1]))[0];
-      if (largest?.[0]?.startsWith('http')) bestUrl = largest[0];
-      else if (largest?.[0]?.startsWith('/')) bestUrl = baseUrl.origin + largest[0];
+      const u = largest?.[0] ? resolveUrl(largest[0]) : null;
+      if (u && IMAGE_EXT.test(u)) { addImage(u, altText, 'img'); continue; }
     }
-
-    const filename = decodeURIComponent(bestUrl.split('/').pop().split('?')[0]);
-    const filenameBase = filename.replace(/\.[^.]+$/, '');
-    const altText = altMatch?.[1] || '';
-    const searchText = `${filename} ${filenameBase} ${altText}`.toLowerCase();
-    images.push({ url: bestUrl, filename, altText, searchText });
+    if (srcMatch) {
+      const u = resolveUrl(srcMatch[1]);
+      if (u) addImage(u, altText, 'img');
+    }
   }
+
   return images;
 }
 
@@ -1495,16 +1521,12 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
               }
             }
 
-            // On a confirmed product page: also include other images (lifestyle etc.)
-            // that aren't navigation/icon/logo noise — gives them a lower score
-            if (finalScore === 0) {
-              const p = new URL(img.url).pathname.toLowerCase();
-              const isNoise = /\/(icon|logo|banner|header|footer|nav|menu|sprite|flag|arrow|star|badge|cart|search)\b/i.test(p)
-                || p.split('/').filter(Boolean).length < 2
-                || /\.(svg)$/i.test(p);
-              if (!isNoise) {
-                finalScore = 50; finalReason = `Produktsida - övrig bild (${pageReason})`;
-              }
+            // On a confirmed product page: gallery-linked images (data-src / lightbox)
+            // are likely lifestyle/alternate shots — include them at a lower score.
+            // Plain <img src> images are skipped here because they include site furniture
+            // (language flags, related-product thumbnails, etc.)
+            if (finalScore === 0 && img.source === 'gallery') {
+              finalScore = 50; finalReason = `Produktsida - galleribild (${pageReason})`;
             }
 
             if (finalScore > 0) {
@@ -1524,9 +1546,6 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
           if (productLimit && productMap.size >= productLimit) {
             aborted = true;
           }
-        } else {
-          // Category page or no match — mark images as seen but don't assign them
-          for (const img of imgs) seenImages.add(img.url);
         }
 
         // Enqueue internal links

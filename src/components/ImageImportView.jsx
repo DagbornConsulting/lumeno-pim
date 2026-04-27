@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Search, CheckCircle, Loader2, Image, X, Globe } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 export default function ImageImportView() {
   const [url, setUrl] = useState('');

@@ -15,7 +15,7 @@ import {
   DEFAULT_MARGIN, DEFAULT_VAT_RATE,
 } from '../utils/pricing';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 const COUNTRY_NAMES = {
   SE: 'Sverige', CN: 'Kina', IN: 'Indien', DE: 'Tyskland', PL: 'Polen',
