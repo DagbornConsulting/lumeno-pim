@@ -53,6 +53,7 @@ export default function App() {
   const [filterType, setFilterType] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterTags, setFilterTags] = useState([]);
+  const [filterImage, setFilterImage] = useState('all'); // 'all' | 'with' | 'without'
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [selectedProductForEdit, setSelectedProductForEdit] = useState(null);
   const [showBatchGenerate, setShowBatchGenerate] = useState(false);
@@ -136,7 +137,7 @@ export default function App() {
     if (loading) return;
 
     loadData(false, true); // append=false, isFilterChange=true
-  }, [filterBrand, filterType, filterStatus, filterTags, searchQuery]);
+  }, [filterBrand, filterType, filterStatus, filterTags, filterImage, searchQuery]);
 
   const loadData = async (append = false, isFilterChange = false) => {
     if (append) {
@@ -172,6 +173,9 @@ export default function App() {
       }
       if (filterTags.length > 0) {
         params.append('tags', filterTags.join(','));
+      }
+      if (filterImage && filterImage !== 'all') {
+        params.append('imageFilter', filterImage);
       }
       if (searchQuery) {
         params.append('search', searchQuery);
@@ -939,6 +943,8 @@ export default function App() {
               setFilterStatus={setFilterStatus}
               filterTags={filterTags}
               setFilterTags={setFilterTags}
+              filterImage={filterImage}
+              setFilterImage={setFilterImage}
               brands={allBrands}
               types={allTypes}
               allTags={allTags}
@@ -1078,6 +1084,7 @@ function ProductsView({
   toggleProductSelection, selectAllProducts,
   filterBrand, setFilterBrand, filterType, setFilterType,
   filterStatus, setFilterStatus, filterTags, setFilterTags,
+  filterImage, setFilterImage,
   brands, types, allTags,
   stats, onPublish, onEditProduct, onBatchGenerate, onExport, onAddProduct,
   hasMoreProducts, loadingMore, filterLoading, onLoadMore, currentlyLoaded,
@@ -1247,6 +1254,16 @@ function ProductsView({
           <option value="draft">Utkast</option>
           <option value="active">Aktiv</option>
           <option value="archived">Arkiverad</option>
+        </select>
+
+        <select
+          className="filter-select"
+          value={filterImage}
+          onChange={(e) => setFilterImage(e.target.value)}
+        >
+          <option value="all">Alla bilder</option>
+          <option value="with">Har bilder</option>
+          <option value="without">Saknar bilder</option>
         </select>
 
         <div className="tag-filter-container" style={{ position: 'relative' }}>

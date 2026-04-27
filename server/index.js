@@ -2271,7 +2271,7 @@ app.get('/api/db/products', async (req, res) => {
     const storeId = getStoreId(req);
     if (!storeId) return res.json({ data: [], count: 0, total: 0 });
 
-    const { vendor, type, status, tags, search, storeFilter, syncFilter, limit, offset } = req.query;
+    const { vendor, type, status, tags, search, storeFilter, syncFilter, imageFilter, limit, offset } = req.query;
 
     const result = await db.getProducts({
       vendor,
@@ -2282,6 +2282,7 @@ app.get('/api/db/products', async (req, res) => {
       storeId,
       storeFilter, // 'published', 'unpublished', or 'error'
       syncFilter, // 'pending' - visar produkter som behöver synkas
+      imageFilter, // 'with' eller 'without' — produkter med/utan bilder
       limit: parseInt(limit) || 3000, // Max 3000 per request
       offset: parseInt(offset) || 0
     });

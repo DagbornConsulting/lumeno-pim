@@ -103,6 +103,7 @@ export const db = {
     storeId,
     storeFilter, // 'published' or 'unpublished'
     syncFilter, // 'pending' - visar bara produkter som behöver synkas till Central
+    imageFilter, // 'with' = bara produkter med minst en bild, 'without' = bara utan
     limit = 100,
     offset = 0
   } = {}) {
@@ -185,6 +186,13 @@ export const db = {
           sp.sync_status === 'pending'
         )
       );
+    }
+
+    // Apply image filter — products that have / lack images
+    if (imageFilter === 'with') {
+      filteredData = filteredData.filter(p => (p.images?.length || 0) > 0);
+    } else if (imageFilter === 'without') {
+      filteredData = filteredData.filter(p => (p.images?.length || 0) === 0);
     }
 
     // Apply pagination after all filtering
