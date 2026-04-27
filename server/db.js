@@ -130,7 +130,12 @@ export const db = {
     if (type) baseQuery = baseQuery.eq('product_type', type);
     if (status) baseQuery = baseQuery.eq('status', status);
     if (tags?.length) baseQuery = baseQuery.overlaps('tags', tags);
-    if (search) baseQuery = baseQuery.or(`title.ilike.%${search}%,vendor.ilike.%${search}%`);
+    if (search) {
+      // Wrap value in double quotes so PostgREST treats reserved chars (, . : () ) as literal.
+      // Escape embedded backslashes and double quotes per PostgREST grammar.
+      const safe = search.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      baseQuery = baseQuery.or(`title.ilike."%${safe}%",vendor.ilike."%${safe}%"`);
+    }
 
     // Fetch ALL matching products using pagination (Supabase has 1000 row limit per request)
     let allData = [];
