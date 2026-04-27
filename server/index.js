@@ -1495,6 +1495,18 @@ app.post('/api/images/bulk-scrape', async (req, res) => {
               }
             }
 
+            // On a confirmed product page: also include other images (lifestyle etc.)
+            // that aren't navigation/icon/logo noise — gives them a lower score
+            if (finalScore === 0) {
+              const p = new URL(img.url).pathname.toLowerCase();
+              const isNoise = /\/(icon|logo|banner|header|footer|nav|menu|sprite|flag|arrow|star|badge|cart|search)\b/i.test(p)
+                || p.split('/').filter(Boolean).length < 2
+                || /\.(svg)$/i.test(p);
+              if (!isNoise) {
+                finalScore = 50; finalReason = `Produktsida - övrig bild (${pageReason})`;
+              }
+            }
+
             if (finalScore > 0) {
               const existing = productMap.get(pid).images.get(img.url);
               if (!existing || finalScore > existing.score) {
