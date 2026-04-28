@@ -545,12 +545,19 @@ export const shopifySync = {
 
     // Variants - if product has variants, use them; otherwise create default variant
     if (product.variants?.length) {
+      // Only declare an option on the product when at least one variant has a value for it.
+      // Shopify rejects products that declare options with no corresponding variant values.
+      const firstVariant = product.variants[0];
+      const opt1Used = firstVariant.option1_name && product.variants.some(v => v.option1_value);
+      const opt2Used = firstVariant.option2_name && product.variants.some(v => v.option2_value);
+      const opt3Used = firstVariant.option3_name && product.variants.some(v => v.option3_value);
+
       shopifyProduct.variants = product.variants.map((v, idx) => {
         const price = v.price ?? product.default_price ?? 0;
         const compareAtPrice = v.compare_at_price ?? product.default_compare_at_price;
-        
+
         console.log(`Variant ${idx}: SKU=${v.sku}, price=${price}, compare_at=${compareAtPrice}`);
-        
+
         const variantObj = {
           sku: v.sku || '',
           barcode: v.barcode || '',
@@ -563,9 +570,11 @@ export const shopifySync = {
           inventory_policy: v.inventory_policy || product.inventory_policy || 'deny',
           requires_shipping: product.requires_shipping !== false,
           taxable: product.charge_tax !== false,
-          option1: v.option1_value || null,
-          option2: v.option2_value || null,
-          option3: v.option3_value || null
+          // Fall back to "Default Title" when no real option is in use, so single-variant
+          // products without options still satisfy Shopify's variant-must-have-option1 rule
+          option1: opt1Used ? (v.option1_value || null) : (idx === 0 ? 'Default Title' : null),
+          option2: opt2Used ? (v.option2_value || null) : null,
+          option3: opt3Used ? (v.option3_value || null) : null
         };
         // Include Shopify variant ID for updates - required for price changes
         if (v.shopify_variant_id) {
@@ -574,12 +583,10 @@ export const shopifySync = {
         return variantObj;
       });
 
-      // Extract option names
-      const firstVariant = product.variants[0];
       shopifyProduct.options = [];
-      if (firstVariant.option1_name) shopifyProduct.options.push({ name: firstVariant.option1_name });
-      if (firstVariant.option2_name) shopifyProduct.options.push({ name: firstVariant.option2_name });
-      if (firstVariant.option3_name) shopifyProduct.options.push({ name: firstVariant.option3_name });
+      if (opt1Used) shopifyProduct.options.push({ name: firstVariant.option1_name });
+      if (opt2Used) shopifyProduct.options.push({ name: firstVariant.option2_name });
+      if (opt3Used) shopifyProduct.options.push({ name: firstVariant.option3_name });
     } else {
       // No variants - create default variant with product-level data
       const price = product.default_price ?? 0;

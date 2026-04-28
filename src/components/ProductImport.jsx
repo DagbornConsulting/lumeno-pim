@@ -204,6 +204,7 @@ export default function ProductImport({ onImportComplete, onClose }) {
   const [overrideVendor, setOverrideVendor] = useState('');
   const [preview, setPreview] = useState([]);
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(null); // { done, total }
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -395,28 +396,53 @@ export default function ProductImport({ onImportComplete, onClose }) {
   const handleImport = async () => {
     setImporting(true);
     setError(null);
+    setImportProgress(null);
     try {
       const products = overrideVendor.trim()
         ? preview.map(p => ({ ...p, vendor: overrideVendor.trim() }))
         : preview;
 
-      const res = await fetch(`${API_URL}/db/products/import`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          products,
-          supplierName: saveMapping ? supplierName : null,
-          mapping: saveMapping ? mapping : null,
-          groupCol: saveMapping ? groupCol : null,
-          variantOptions: saveMapping ? variantOptions : null,
-          headers: saveMapping ? headers : null,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Import misslyckades');
-      setResult(data);
+      // Chunk to avoid Vercel's 30s function timeout. ~50 products per batch
+      // keeps each request well under the limit while showing meaningful progress.
+      const CHUNK_SIZE = 50;
+      const totals = { created: 0, updated: 0, errors: 0, errorDetails: [] };
+      setImportProgress({ done: 0, total: products.length });
+
+      for (let i = 0; i < products.length; i += CHUNK_SIZE) {
+        const chunk = products.slice(i, i + CHUNK_SIZE);
+        const isLast = i + CHUNK_SIZE >= products.length;
+
+        const res = await fetch(`${API_URL}/db/products/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            products: chunk,
+            // Save mapping profile only on the last chunk to avoid redundant writes
+            supplierName: saveMapping && isLast ? supplierName : null,
+            mapping: saveMapping && isLast ? mapping : null,
+            groupCol: saveMapping && isLast ? groupCol : null,
+            variantOptions: saveMapping && isLast ? variantOptions : null,
+            headers: saveMapping && isLast ? headers : null,
+          }),
+        });
+
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); }
+        catch { throw new Error(`Servern returnerade ej-JSON (status ${res.status}): ${text.slice(0, 120)}`); }
+
+        if (!res.ok) throw new Error(data.error || `Import misslyckades vid produkt ${i + 1}`);
+
+        totals.created += data.created || 0;
+        totals.updated += data.updated || 0;
+        totals.errors += data.errors || 0;
+        if (data.errorDetails?.length) totals.errorDetails.push(...data.errorDetails);
+        setImportProgress({ done: Math.min(i + CHUNK_SIZE, products.length), total: products.length });
+      }
+
+      setResult(totals);
       setStep(3);
-      if (onImportComplete) onImportComplete(data);
+      if (onImportComplete) onImportComplete(totals);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -889,7 +915,9 @@ export default function ProductImport({ onImportComplete, onClose }) {
               <button className="btn btn-secondary" onClick={() => setStep(1)}>Tillbaka</button>
               <button className="btn btn-primary" onClick={handleImport} disabled={importing}>
                 {importing
-                  ? <><Loader2 size={16} className="spin" /> Importerar...</>
+                  ? <><Loader2 size={16} className="spin" /> {importProgress
+                      ? `Importerar ${importProgress.done}/${importProgress.total}...`
+                      : 'Importerar...'}</>
                   : `Importera ${preview.length} produkter`}
               </button>
             </div>
