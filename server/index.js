@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import sanitizeHtmlLib from 'sanitize-html';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import dns from 'dns';
@@ -100,6 +101,56 @@ const assertUrlAllowed = async (rawUrl) => {
 const safeFetch = async (url, options = {}) => {
   await assertUrlAllowed(url);
   return fetch(url, options);
+};
+
+// ============================================
+// HTML SANITIZATION
+// All rich-text (product/collection descriptions) can come from AI generation,
+// imported files or scraped pages. Sanitize on the way in so neither the DB nor
+// the Shopify storefront ever holds executable HTML. The allowlist keeps the
+// formatting Quill produces (headings, lists, links, images, basic styling) and
+// strips scripts, event handlers and javascript:/data: URLs.
+// ============================================
+const sanitizeHtml = (dirty) => {
+  if (typeof dirty !== 'string' || dirty === '') return dirty;
+  return sanitizeHtmlLib(dirty, {
+    allowedTags: [
+      'p', 'br', 'span', 'div', 'strong', 'b', 'em', 'i', 'u', 's', 'sub', 'sup',
+      'ul', 'ol', 'li', 'a', 'img', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'blockquote', 'pre', 'code', 'hr',
+      'table', 'thead', 'tbody', 'tr', 'td', 'th',
+    ],
+    allowedAttributes: {
+      a: ['href', 'title', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height'],
+      '*': ['style'],
+    },
+    allowedSchemes: ['http', 'https', 'mailto', 'tel'],
+    allowedSchemesByTag: { img: ['http', 'https'] }, // no data: URIs
+    allowedStyles: {
+      '*': {
+        'text-align': [/^(left|right|center|justify)$/],
+        'color': [/^#[0-9a-fA-F]{3,6}$/, /^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/],
+        'background-color': [/^#[0-9a-fA-F]{3,6}$/, /^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/],
+        'font-weight': [/^(normal|bold|[1-9]00)$/],
+        'text-decoration': [/^(underline|line-through|none)$/],
+      },
+    },
+    transformTags: {
+      // Force safe rel on any link that opens a new tab.
+      a: sanitizeHtmlLib.simpleTransform('a', { rel: 'noopener noreferrer' }, false),
+    },
+  });
+};
+
+// Sanitize the known HTML-bearing fields of a product/collection object in place.
+const HTML_FIELDS = ['description', 'short_description', 'use_cases', 'body_html', 'intro'];
+const sanitizeHtmlFields = (obj) => {
+  if (!obj || typeof obj !== 'object') return obj;
+  for (const f of HTML_FIELDS) {
+    if (typeof obj[f] === 'string') obj[f] = sanitizeHtml(obj[f]);
+  }
+  return obj;
 };
 
 dotenv.config();
@@ -1003,9 +1054,10 @@ Svara ENBART med giltig JSON:
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const result = JSON.parse(jsonMatch[0]);
+      if (typeof result.description === 'string') result.description = sanitizeHtml(result.description);
       res.json(result);
     } else {
-      res.json({ description: text });
+      res.json({ description: sanitizeHtml(text) });
     }
 
   } catch (error) {
@@ -1077,16 +1129,18 @@ Svara ENDAST med JSON:
         const jsonMatch = text.match(/\{[\s\S]*\}/);
 
         if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (typeof parsed.description === 'string') parsed.description = sanitizeHtml(parsed.description);
           results.push({
             productId: product.id,
             success: true,
-            ...JSON.parse(jsonMatch[0])
+            ...parsed
           });
         } else {
           results.push({
             productId: product.id,
             success: true,
-            description: text
+            description: sanitizeHtml(text)
           });
         }
 
@@ -1367,6 +1421,15 @@ REGLER:
       }
     } else {
       result = text.trim();
+    }
+
+    // Sanitize any HTML the model returned before it reaches the editor.
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      for (const f of ['description', 'intro', 'useCases']) {
+        if (typeof result[f] === 'string') result[f] = sanitizeHtml(result[f]);
+      }
+    } else if (typeof result === 'string' && ['description', 'intro', 'useCases'].includes(field)) {
+      result = sanitizeHtml(result);
     }
 
     res.json({ field, result });
@@ -2529,11 +2592,11 @@ app.post('/api/db/products', async (req, res) => {
     if (!storeId) return res.status(400).json({ error: 'store_id krävs' });
 
     // Ensure title is set (required by database)
-    const productData = {
+    const productData = sanitizeHtmlFields({
       ...req.body,
       title: req.body.title || 'Ny produkt',
       store_id: storeId
-    };
+    });
 
     console.log('Creating product:', JSON.stringify(productData, null, 2));
 
@@ -2565,7 +2628,7 @@ app.post('/api/db/products/import', async (req, res) => {
 
       const firstVariant = p.variants?.[0] || {};
 
-      const productData = {
+      const productData = sanitizeHtmlFields({
         title: p.title,
         description: p.description || '',
         vendor: p.vendor || '',
@@ -2608,7 +2671,7 @@ app.post('/api/db/products/import', async (req, res) => {
           option3_name: v.option3Name || null,
           option3_value: v.option3Value || null,
         })),
-      };
+      });
 
       // Duplicate check: SKU first, then barcode
       const sku = productData.sku;
@@ -2735,7 +2798,7 @@ app.put('/api/db/products/:id', async (req, res) => {
       return res.status(403).json({ error: 'Produkten tillhör inte denna butik' });
     }
 
-    const product = await db.updateProduct(req.params.id, req.body);
+    const product = await db.updateProduct(req.params.id, sanitizeHtmlFields(req.body));
 
     // Recompute default_price if pricing inputs changed
     const pricingFields = ['default_cost', 'margin_multiplier', 'product_type', 'supplier_id'];
@@ -3376,7 +3439,7 @@ app.post('/api/db/collections', async (req, res) => {
         store_id: storeId,
         title,
         handle: slug,
-        description: description || null,
+        description: sanitizeHtml(description) || null,
         collection_type: collection_type || 'manual',
         sort_order: sort_order || 'best-selling',
         published: published !== undefined ? published : true,
@@ -3387,8 +3450,8 @@ app.post('/api/db/collections', async (req, res) => {
         seo_title: seo_title || null,
         seo_description: seo_description || null,
         agent_summary: agent_summary || null,
-        short_description: short_description || null,
-        use_cases: use_cases || null,
+        short_description: sanitizeHtml(short_description) || null,
+        use_cases: sanitizeHtml(use_cases) || null,
         faq: faq || null,
         metafields: metafields || {},
         sync_status: 'pending',
@@ -3407,7 +3470,7 @@ app.post('/api/db/collections', async (req, res) => {
 app.put('/api/db/collections/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const fields = req.body;
+    const fields = sanitizeHtmlFields(req.body);
     // Remove id from fields if present
     delete fields.id;
     // Ensure sync_status is marked pending if content changed (unless explicitly set)
@@ -3810,6 +3873,15 @@ REGLER:
       }
     } else {
       result = text.trim();
+    }
+
+    // Sanitize any HTML the model returned before it reaches the editor.
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      for (const f of ['description', 'intro', 'useCases', 'short_description']) {
+        if (typeof result[f] === 'string') result[f] = sanitizeHtml(result[f]);
+      }
+    } else if (typeof result === 'string' && ['description', 'intro'].includes(field)) {
+      result = sanitizeHtml(result);
     }
 
     res.json({ field, result });
