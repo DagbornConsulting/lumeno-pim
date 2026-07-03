@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import dns from 'dns';
@@ -129,6 +130,11 @@ const corsOrigins = isProduction
 if (isProduction && corsOrigins === false) {
   console.warn('⚠️ FRONTEND_URL not set in production — CORS will reject all cross-origin requests');
 }
+// Security headers. CSP is intentionally disabled here — this Express app
+// serves the JSON API, not the HTML page, so the Content-Security-Policy that
+// protects the frontend belongs on the static host (vercel.json). helmet still
+// gives us HSTS, nosniff, frame-denial, referrer policy and X-Powered-By removal.
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: corsOrigins, credentials: true }));
 // Body size limits kept modest to reduce memory-exhaustion DoS surface.
 // File uploads go through multer with their own limits, not JSON.
@@ -504,7 +510,7 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     try {
       const { data, error } = await supabase
         .from('users')
-        .select('id, name, email, password_hash, role')
+        .select('id, name, email, password_hash, role, is_active')
         .eq('email', email.toLowerCase())
         .single();
 
@@ -529,6 +535,11 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
   if (!user || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Felaktig e-post eller lösenord' });
+  }
+
+  // Deactivated accounts cannot log in, even with valid credentials.
+  if (user.is_active === false) {
+    return res.status(403).json({ error: 'Kontot är inaktiverat' });
   }
 
   const token = generateToken();
