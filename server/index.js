@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import dns from 'dns';
+import net from 'net';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
@@ -37,6 +39,68 @@ const _loadHeavyModules = async () => {
 };
 _loadHeavyModules(); // fire-and-forget, runs in background
 
+// ============================================
+// SSRF GUARD
+// Any endpoint that fetches a user-supplied URL server-side must route through
+// safeFetch(). It enforces http(s) only and resolves the hostname, rejecting
+// private / loopback / link-local / cloud-metadata targets so the URL can't be
+// used to reach internal services (e.g. 169.254.169.254, localhost, 10.x).
+// ============================================
+const isPrivateIp = (ip) => {
+  const v = net.isIP(ip);
+  if (v === 4) {
+    const p = ip.split('.').map(Number);
+    if (p[0] === 10) return true;                         // 10.0.0.0/8
+    if (p[0] === 127) return true;                        // loopback
+    if (p[0] === 0) return true;                          // 0.0.0.0/8
+    if (p[0] === 169 && p[1] === 254) return true;        // link-local + metadata
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true; // 172.16/12
+    if (p[0] === 192 && p[1] === 168) return true;        // 192.168/16
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // CGNAT 100.64/10
+    return false;
+  }
+  if (v === 6) {
+    const a = ip.toLowerCase();
+    if (a === '::1' || a === '::') return true;            // loopback / unspecified
+    if (a.startsWith('fe80') || a.startsWith('fc') || a.startsWith('fd')) return true; // link-local / ULA
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d) — re-check the embedded v4
+    const m = a.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (m) return isPrivateIp(m[1]);
+    return false;
+  }
+  return true; // not a literal IP → treat as unresolvable/unsafe
+};
+
+const assertUrlAllowed = async (rawUrl) => {
+  let u;
+  try { u = new URL(rawUrl); } catch { throw new Error('Ogiltig URL'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('Endast http/https tillåts');
+  }
+  const host = u.hostname;
+  // Literal IP in the URL → check directly.
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw new Error('Intern adress blockerad');
+    return;
+  }
+  // Hostname → resolve all A/AAAA records and reject if any is private.
+  let addrs;
+  try {
+    addrs = await dns.promises.lookup(host, { all: true });
+  } catch {
+    throw new Error('Kunde inte slå upp värdnamn');
+  }
+  if (!addrs.length || addrs.some(a => isPrivateIp(a.address))) {
+    throw new Error('Intern adress blockerad');
+  }
+};
+
+// Drop-in replacement for fetch() on user-supplied URLs.
+const safeFetch = async (url, options = {}) => {
+  await assertUrlAllowed(url);
+  return fetch(url, options);
+};
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,18 +109,30 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+// Behind Vercel/Railway proxies — trust the first proxy so req.ip and
+// x-forwarded-for reflect the real client for rate limiting.
+app.set('trust proxy', 1);
 
 // Initialize sync worker
 const syncWorker = new SyncWorker();
 
 // Middleware
-// CORS - restrict in production, allow all in development
+// CORS - restrict in production, allow all in development.
+// In production we require an explicit FRONTEND_URL allowlist and fail closed
+// (no reflected origin) if it is missing, rather than echoing any origin.
 const isProduction = process.env.NODE_ENV === 'production';
-const corsOrigins = isProduction && process.env.FRONTEND_URL
-  ? [process.env.FRONTEND_URL]
+const corsOrigins = isProduction
+  ? (process.env.FRONTEND_URL
+      ? process.env.FRONTEND_URL.split(',').map(s => s.trim()).filter(Boolean)
+      : false)
   : true;
+if (isProduction && corsOrigins === false) {
+  console.warn('⚠️ FRONTEND_URL not set in production — CORS will reject all cross-origin requests');
+}
 app.use(cors({ origin: corsOrigins, credentials: true }));
-app.use(express.json({ limit: '50mb' }));
+// Body size limits kept modest to reduce memory-exhaustion DoS surface.
+// File uploads go through multer with their own limits, not JSON.
+app.use(express.json({ limit: '10mb' }));
 
 // File upload config
 
@@ -283,11 +359,20 @@ const requireAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  // Resolve the active store from the client-supplied header/query, but never
+  // trust it blindly: a non-admin may only act on stores they are assigned to.
+  // Admins may act on any store (they manage all tenants).
+  const requestedStoreId = req.headers['x-store-id'] || req.query.storeId || null;
+  if (requestedStoreId && session.role !== 'admin' && !session.storeIds.includes(requestedStoreId)) {
+    return res.status(403).json({ error: 'Forbidden - no access to this store' });
+  }
+  const activeStoreId = requestedStoreId || (session.storeIds.length > 0 ? session.storeIds[0] : null);
+
   req.user = {
     id: session.userId,
     role: session.role,
     storeIds: session.storeIds,
-    activeStoreId: req.headers['x-store-id'] || (session.storeIds.length > 0 ? session.storeIds[0] : null)
+    activeStoreId
   };
   next();
 };
@@ -300,11 +385,23 @@ const requireAdmin = async (req, res, next) => {
   next();
 };
 
+// Store-access middleware - for routes with a store id in the path
+// (:id or :storeId). Admins pass; others must have the store assigned.
+const requireStoreAccess = async (req, res, next) => {
+  if (req.user.role === 'admin') return next();
+  const storeId = req.params.storeId || req.params.id;
+  if (storeId && (req.user.storeIds || []).includes(storeId)) return next();
+  return res.status(403).json({ error: 'Forbidden - no access to this store' });
+};
+
 // ============================================
 // STORE ID HELPER
 // ============================================
+// Return the store the request is authorized to act on. This is the value
+// validated in requireAuth (header/query checked against the user's stores),
+// NOT the raw header — so callers can't reach across tenants.
 const getStoreId = (req) => {
-  return req.headers['x-store-id'] || req.query.storeId || req.user?.activeStoreId;
+  return req.user?.activeStoreId || null;
 };
 
 // Async version: falls back to user's first store from DB
@@ -317,29 +414,81 @@ const resolveStoreId = async (req) => {
 };
 
 // ============================================
-// PROTECT DATA + AI ENDPOINTS
-// Anything under /api/db, /api/claude, /api/shopify, /api/import, /api/images,
-// /api/mappings and /api/feeds requires a valid session token.
-// /api/auth/* and /api/health stay open.
+// RATE LIMITING (lightweight, in-memory)
+// Note: on serverless (Vercel) memory is per-instance and resets on cold start,
+// so this is best-effort there. On a persistent host (Railway) it is effective.
+// For strong guarantees behind multiple instances, back this with Redis/DB.
 // ============================================
-const protectedPrefixes = ['/api/db', '/api/claude', '/api/shopify', '/api/import', '/api/images', '/api/mappings', '/api/feeds', '/api/inventory'];
-const publicShopifyPaths = ['/api/shopify/callback', '/api/shopify/install', '/api/shopify/app-status', '/api/shopify/webhooks'];
-app.use((req, res, next) => {
-  // Public feed URLs use a per-feed token, not a session token
-  if (req.path.startsWith('/api/feeds/') && req.method === 'GET') return next();
-  // Shopify OAuth endpoints must be public (no auth header from Shopify)
-  if (publicShopifyPaths.some(p => req.path.startsWith(p))) return next();
-  if (protectedPrefixes.some(p => req.path.startsWith(p))) {
-    return requireAuth(req, res, next);
+const _rlBuckets = new Map(); // key -> { count, resetAt }
+const rateLimit = ({ windowMs, max, keyFn, message }) => (req, res, next) => {
+  const key = keyFn(req);
+  const now = Date.now();
+  let bucket = _rlBuckets.get(key);
+  if (!bucket || bucket.resetAt < now) {
+    bucket = { count: 0, resetAt: now + windowMs };
+    _rlBuckets.set(key, bucket);
+  }
+  bucket.count++;
+  if (bucket.count > max) {
+    res.set('Retry-After', String(Math.ceil((bucket.resetAt - now) / 1000)));
+    return res.status(429).json({ error: message || 'För många förfrågningar, försök igen senare' });
   }
   next();
+};
+// Occasionally evict stale buckets so the map doesn't grow unbounded.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of _rlBuckets) if (b.resetAt < now) _rlBuckets.delete(k);
+}, 10 * 60 * 1000);
+
+const clientIp = (req) =>
+  (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.ip || req.socket?.remoteAddress || 'unknown';
+
+// Brute-force protection on login: 10 attempts / 15 min per IP+email.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyFn: (req) => `login:${clientIp(req)}:${(req.body?.email || '').toLowerCase()}`,
+  message: 'För många inloggningsförsök. Vänta en stund och försök igen.',
+});
+
+// ============================================
+// PROTECT DATA + AI ENDPOINTS  (default-deny)
+// Every /api/* route requires a valid session token EXCEPT an explicit
+// allowlist of public endpoints below. This is default-deny: a newly added
+// route is protected automatically unless someone opts it out here.
+// ============================================
+// Exact public paths (no auth needed).
+const publicExactPaths = new Set([
+  '/api/ping',
+  '/api/health',
+  '/api/auth/login',
+  '/api/auth/verify',   // validates its own bearer token internally
+  '/api/auth/logout',
+]);
+// Public path prefixes — Shopify OAuth/webhooks send no session header.
+const publicPrefixes = [
+  '/api/shopify/callback',
+  '/api/shopify/install',
+  '/api/shopify/app-status',
+  '/api/shopify/webhooks',
+];
+app.use((req, res, next) => {
+  // Non-/api routes (static assets, SPA) are not gated here.
+  if (!req.path.startsWith('/api/')) return next();
+  // Public feed URLs authenticate with a per-feed token, not a session token.
+  if (req.path.startsWith('/api/feeds/') && req.method === 'GET') return next();
+  if (publicExactPaths.has(req.path)) return next();
+  if (publicPrefixes.some(p => req.path.startsWith(p))) return next();
+  // Everything else under /api requires a valid session.
+  return requireAuth(req, res, next);
 });
 
 // Health / ping — no auth, no DB
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // Login endpoint
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
 
   const { email, password } = req.body;
 
@@ -866,8 +1015,18 @@ app.post('/api/claude/batch-generate', async (req, res) => {
 
     const { products, style, language, length, includeSEO } = req.body;
 
+    // Cap batch size: each product triggers a paid Anthropic call, so an
+    // unbounded array is a cost-DoS. Reject oversized batches outright.
+    const MAX_BATCH = 50;
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ error: 'products måste vara en icke-tom lista' });
+    }
+    if (products.length > MAX_BATCH) {
+      return res.status(413).json({ error: `Max ${MAX_BATCH} produkter per batch (fick ${products.length})` });
+    }
+
     const results = [];
-    
+
     for (const product of products) {
       try {
         const lengthGuide = {
@@ -1216,7 +1375,7 @@ app.post('/api/source/scrape-images', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'url krävs' });
 
   try {
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PIM-bot/1.0)' },
       signal: AbortSignal.timeout(12000),
     });
@@ -1714,7 +1873,7 @@ app.post('/api/source/fetch-url', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'url krävs' });
   try {
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PIM-bot/1.0)' },
       signal: AbortSignal.timeout(10000),
     });
@@ -2634,15 +2793,28 @@ app.post('/api/db/products/bulk-update', async (req, res) => {
 // --- STORES ---
 
 // Get all stores
+// Never expose the Shopify Admin token (or other secrets) to any client.
+// The UI only needs to know whether a token is configured.
+const sanitizeStore = (store) => {
+  if (!store || typeof store !== 'object') return store;
+  const { access_token, ...rest } = store;
+  return { ...rest, has_access_token: Boolean(access_token) };
+};
+
 app.get('/api/db/stores', async (req, res) => {
   try {
     // Return empty if no database configured
     if (!isDbConfigured()) {
       return res.json([]);
     }
-    
-    const stores = await db.getStores();
-    res.json(stores);
+
+    let stores = await db.getStores();
+    // Non-admins only see the stores they are assigned to.
+    if (req.user.role !== 'admin') {
+      const allowed = new Set(req.user.storeIds || []);
+      stores = stores.filter(s => allowed.has(s.id));
+    }
+    res.json(stores.map(sanitizeStore));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2651,31 +2823,35 @@ app.get('/api/db/stores', async (req, res) => {
 // Get single store
 app.get('/api/db/stores/:id', async (req, res) => {
   try {
+    // Non-admins may only read stores they are assigned to.
+    if (req.user.role !== 'admin' && !(req.user.storeIds || []).includes(req.params.id)) {
+      return res.status(403).json({ error: 'Forbidden - no access to this store' });
+    }
     const store = await db.getStoreById(req.params.id);
     if (!store) {
       return res.status(404).json({ error: 'Store not found' });
     }
-    res.json(store);
+    res.json(sanitizeStore(store));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Create store
-app.post('/api/db/stores', async (req, res) => {
+// Create store (admin only — store configuration)
+app.post('/api/db/stores', requireAdmin, async (req, res) => {
   try {
     const store = await db.createStore(req.body);
-    res.status(201).json(store);
+    res.status(201).json(sanitizeStore(store));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Update store
-app.put('/api/db/stores/:id', async (req, res) => {
+// Update store (admin only)
+app.put('/api/db/stores/:id', requireAdmin, async (req, res) => {
   try {
     const store = await db.updateStore(req.params.id, req.body);
-    res.json(store);
+    res.json(sanitizeStore(store));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -3687,13 +3863,13 @@ app.get('/api/db/sync-queue', async (req, res) => {
 // --- SYNC WORKER CONTROL ---
 
 // Start sync worker
-app.post('/api/sync-worker/start', (req, res) => {
+app.post('/api/sync-worker/start', requireAdmin, (req, res) => {
   syncWorker.start();
   res.json({ status: 'started' });
 });
 
-// Stop sync worker
-app.post('/api/sync-worker/stop', (req, res) => {
+// Stop sync worker (admin only)
+app.post('/api/sync-worker/stop', requireAdmin, (req, res) => {
   syncWorker.stop();
   res.json({ status: 'stopped' });
 });
@@ -3949,8 +4125,8 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
   }
 });
 
-// Delete a store
-app.delete('/api/db/stores/:id', async (req, res) => {
+// Delete a store (admin only)
+app.delete('/api/db/stores/:id', requireAdmin, async (req, res) => {
   try {
     await shopifyApp.deleteStore(req.params.id);
     res.json({ success: true });
@@ -3959,8 +4135,8 @@ app.delete('/api/db/stores/:id', async (req, res) => {
   }
 });
 
-// Manual store connection (without OAuth - for custom apps)
-app.post('/api/db/stores/connect-manual', async (req, res) => {
+// Manual store connection (without OAuth - for custom apps) (admin only)
+app.post('/api/db/stores/connect-manual', requireAdmin, async (req, res) => {
   try {
     const { shop, accessToken, name } = req.body;
     

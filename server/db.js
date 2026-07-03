@@ -12,7 +12,14 @@ const { Pool } = pg;
 // ============================================
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+// The server MUST use the service-role key: it operates on behalf of all
+// tenants and, once RLS is enabled, the anon key would be denied by policy.
+// Falling back to the anon key silently would either break the app (RLS on)
+// or mask a misconfiguration (RLS off). Fail loudly instead.
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
+if (supabaseUrl && !supabaseKey) {
+  console.error('❌ SUPABASE_SERVICE_KEY missing — the server requires the service-role key. Refusing to fall back to the anon key.');
+}
 
 const supabaseClient = supabaseUrl && supabaseKey
   ? createClient(supabaseUrl, supabaseKey, {
