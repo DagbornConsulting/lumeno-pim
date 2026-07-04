@@ -238,7 +238,13 @@ export default function InventorySync() {
                 {diff.matched} matchade &nbsp;·&nbsp;
                 <span style={{ color: diff.changed > 0 ? '#f59e0b' : 'inherit' }}>{diff.changed} med förändring</span>
                 {diff.notFound?.length > 0 && (
-                  <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.notFound.length} ej hittade</span>
+                  <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.notFound.length} ej i Shopify</span>
+                )}
+                {diff.skippedDuplicate > 0 && (
+                  <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.skippedDuplicate} SKU-dubletter</span>
+                )}
+                {diff.skippedUntracked > 0 && (
+                  <span style={{ color: 'var(--text-secondary, #888)' }}>&nbsp;·&nbsp;{diff.skippedUntracked} otrackade</span>
                 )}
               </div>
             </div>
@@ -307,10 +313,32 @@ export default function InventorySync() {
             {diff.notFound?.length > 0 && (
               <details style={{ marginTop: 12 }}>
                 <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary, #888)' }}>
-                  SKUs som saknas i PIM ({diff.notFound.length})
+                  SKUs som saknas i Shopify ({diff.notFound.length})
                 </summary>
                 <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
                   {diff.notFound.join(', ')}
+                </p>
+              </details>
+            )}
+
+            {diff.duplicates?.length > 0 && (
+              <details style={{ marginTop: 12 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 13, color: '#ef4444' }}>
+                  SKU-dubletter i Shopify — hoppas över, rensa manuellt ({diff.duplicates.length})
+                </summary>
+                <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
+                  {diff.duplicates.join(', ')}
+                </p>
+              </details>
+            )}
+
+            {diff.untracked?.length > 0 && (
+              <details style={{ marginTop: 12 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary, #888)' }}>
+                  SKUs med lagerspårning av — hoppas över ({diff.untracked.length})
+                </summary>
+                <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
+                  {diff.untracked.join(', ')}
                 </p>
               </details>
             )}

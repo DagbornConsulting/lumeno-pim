@@ -1033,6 +1033,105 @@ export const shopifySync = {
     const locations = await this.getLocations(store);
     return locations?.[0]?.id ?? null;
   },
+
+  // Get the primary location as a GraphQL GID (needed by inventorySetQuantities).
+  async getPrimaryLocationGid(store) {
+    const id = await this.getPrimaryLocationId(store);
+    if (id == null) return null;
+    const num = String(id).replace(/[^0-9]/g, '');
+    return num ? `gid://shopify/Location/${num}` : null;
+  },
+
+  // Build a live SKU -> variants map straight from Shopify, independent of local
+  // sync state. Returns each variant's inventoryItem GID, current qty and tracked
+  // flag, plus the list of SKUs that map to more than one variant (ambiguous).
+  async fetchInventoryMapFromShopify(store) {
+    const client = this.getClient(store);
+    const map = new Map();
+    let cursor = null;
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    while (true) {
+      let d;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          d = await client.graphql(
+            `query($c: String) {
+              products(first: 100, after: $c) {
+                nodes {
+                  title status
+                  variants(first: 100) {
+                    nodes { sku inventoryQuantity inventoryItem { id tracked } }
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }`,
+            { c: cursor }
+          );
+          break;
+        } catch (e) {
+          // Back off and retry on Shopify GraphQL throttling.
+          if (attempt < 5 && /THROTTLED|throttl/i.test(String(e.message))) {
+            await sleep(2000);
+            continue;
+          }
+          throw e;
+        }
+      }
+
+      for (const p of d.products.nodes) {
+        for (const v of p.variants.nodes) {
+          const sku = (v.sku || '').trim();
+          if (!sku) continue;
+          if (!map.has(sku)) map.set(sku, []);
+          map.get(sku).push({
+            inventoryItemId: v.inventoryItem.id, // GID
+            productTitle: p.title,
+            productStatus: p.status,
+            currentQty: v.inventoryQuantity ?? 0,
+            tracked: v.inventoryItem.tracked,
+          });
+        }
+      }
+
+      if (!d.products.pageInfo.hasNextPage) break;
+      cursor = d.products.pageInfo.endCursor;
+    }
+
+    const duplicateSkus = [...map.entries()].filter(([, l]) => l.length > 1).map(([s]) => s);
+    return { map, duplicateSkus };
+  },
+
+  // Set exact available quantities for a batch of inventory items at one location.
+  // changes: [{ inventoryItemId (GID), quantity }]. Max ~250 per call; caller batches.
+  async setInventoryQuantitiesBatch(store, changes, locationGid) {
+    if (!changes.length) return null;
+    const client = this.getClient(store);
+    const data = await client.graphql(
+      `mutation($input: InventorySetQuantitiesInput!) {
+        inventorySetQuantities(input: $input) {
+          inventoryAdjustmentGroup { createdAt }
+          userErrors { field message code }
+        }
+      }`,
+      {
+        input: {
+          name: 'available',
+          reason: 'correction',
+          ignoreCompareQuantity: true,
+          quantities: changes.map(c => ({
+            inventoryItemId: c.inventoryItemId,
+            locationId: locationGid,
+            quantity: c.quantity,
+          })),
+        },
+      }
+    );
+    const errs = data.inventorySetQuantities?.userErrors || [];
+    if (errs.length) throw new Error(JSON.stringify(errs));
+    return data.inventorySetQuantities?.inventoryAdjustmentGroup ?? null;
+  },
 };
 
 // ============================================

@@ -2165,59 +2165,50 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     const skus = Object.keys(csvMap);
     if (!skus.length) return res.status(400).json({ error: 'Inga giltiga SKU/antal-rader hittades' });
 
-    // Look up variants by SKU in Supabase (only this store)
-    const { data: variants, error: varErr } = await supabase
-      .from('variants')
-      .select('sku, shopify_inventory_item_id, shopify_variant_id, products(title, store_id)')
-      .in('sku', skus);
-
-    if (varErr) throw varErr;
-
-    // Filter to this store
-    const storeVariants = (variants || []).filter(v => String(v.products?.store_id) === String(storeId));
-
     // Get the store
     const store = await db.getStoreById(storeId);
     if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
 
-    // Fetch current inventory from Shopify for matched inventory_item_ids
-    const itemIds = storeVariants
-      .map(v => v.shopify_inventory_item_id)
-      .filter(Boolean)
-      .map(Number);
+    // Resolve the inventory location. Prefer a per-store configured GID
+    // (store.settings.inventory_location_gid) so we don't depend on the
+    // read_locations OAuth scope; fall back to the locations API if allowed.
+    let locationGid = store.settings?.inventory_location_gid || null;
+    if (!locationGid) {
+      try { locationGid = await shopifySync.getPrimaryLocationGid(store); } catch { locationGid = null; }
+    }
+    if (!locationGid) {
+      return res.status(400).json({
+        error: 'Ingen lagerplats konfigurerad. Sätt store.settings.inventory_location_gid (t.ex. "gid://shopify/Location/123") eller ge appen read_locations-scope.',
+      });
+    }
 
-    const shopifyLevels = itemIds.length
-      ? await shopifySync.getInventoryLevelsByItemIds(store, itemIds)
-      : {};
+    // Match live against Shopify (independent of local sync state): build a
+    // SKU -> variants map straight from the store.
+    const { map: shop, duplicateSkus } = await shopifySync.fetchInventoryMapFromShopify(store);
 
-    // Get primary location
-    const primaryLocationId = await shopifySync.getPrimaryLocationId(store);
-
-    // Build diff rows
+    // Build diff rows, tracking why SKUs are skipped.
     const diff = [];
-    const notFound = [];
+    const notFound = [];       // SKU not present in Shopify
+    const duplicates = [];     // SKU maps to >1 variant — must be resolved manually
+    const untracked = [];      // variant has inventory tracking turned off
 
     for (const sku of skus) {
-      const variant = storeVariants.find(v => v.sku === sku);
-      if (!variant || !variant.shopify_inventory_item_id) {
-        notFound.push(sku);
-        continue;
-      }
+      const variants = shop.get(sku);
+      if (!variants || variants.length === 0) { notFound.push(sku); continue; }
+      if (variants.length > 1) { duplicates.push(sku); continue; }
+      const v = variants[0];
+      if (!v.tracked) { untracked.push(sku); continue; }
 
-      const itemId = String(variant.shopify_inventory_item_id);
-      const levels = shopifyLevels[itemId] || [];
-      const currentQty = levels.reduce((sum, l) => sum + (l.available || 0), 0);
+      const currentQty = v.currentQty;
       const newQty = csvMap[sku];
       const delta = newQty - currentQty;
 
-      // Pick best location (first, or primary)
-      const locationId = levels[0]?.locationId ?? primaryLocationId;
-
       diff.push({
         sku,
-        productTitle: variant.products?.title || '',
-        inventoryItemId: variant.shopify_inventory_item_id,
-        locationId,
+        productTitle: v.productTitle || '',
+        productStatus: v.productStatus,
+        inventoryItemId: v.inventoryItemId, // GID
+        locationId: locationGid,
         currentQty,
         newQty,
         delta,
@@ -2230,12 +2221,16 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     res.json({
       diff,
       notFound,
+      duplicates,
+      untracked,
       headers,
       resolvedSkuCol,
       resolvedQtyCol,
       totalRows: parsed.totalRows,
       matched: diff.length,
       changed: diff.filter(r => r.changed).length,
+      skippedDuplicate: duplicates.length,
+      skippedUntracked: untracked.length,
     });
   } catch (error) {
     console.error('Inventory preview error:', error);
@@ -2255,21 +2250,40 @@ app.post('/api/inventory/apply', async (req, res) => {
     const store = await db.getStoreById(storeId);
     if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
 
-    const results = { ok: [], failed: [] };
-
+    // Group items by location, then push each location's changes in batches of
+    // 100 via the batched inventorySetQuantities mutation (one API call each).
+    const byLocation = new Map();
     for (const item of items) {
-      try {
-        await shopifySync.updateInventory(store, item.inventoryItemId, item.locationId, item.newQty);
-        results.ok.push(item.inventoryItemId);
-      } catch (err) {
-        results.failed.push({ inventoryItemId: item.inventoryItemId, error: err.message });
+      if (!item.inventoryItemId || item.locationId == null || item.newQty == null) continue;
+      if (!byLocation.has(item.locationId)) byLocation.set(item.locationId, []);
+      byLocation.get(item.locationId).push({
+        inventoryItemId: item.inventoryItemId,
+        quantity: Number(item.newQty),
+      });
+    }
+
+    const BATCH_SIZE = 100;
+    let updated = 0;
+    const errors = [];
+
+    for (const [locationId, changes] of byLocation) {
+      for (let i = 0; i < changes.length; i += BATCH_SIZE) {
+        const batch = changes.slice(i, i + BATCH_SIZE);
+        try {
+          await shopifySync.setInventoryQuantitiesBatch(store, batch, locationId);
+          updated += batch.length;
+        } catch (err) {
+          errors.push({ count: batch.length, error: err.message });
+        }
+        // Gentle pacing between batches to stay within API limits.
+        await new Promise(r => setTimeout(r, 500));
       }
     }
 
     res.json({
-      updated: results.ok.length,
-      failed: results.failed.length,
-      errors: results.failed,
+      updated,
+      failed: errors.reduce((sum, e) => sum + e.count, 0),
+      errors,
     });
   } catch (error) {
     console.error('Inventory apply error:', error);
