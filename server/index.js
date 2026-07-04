@@ -1164,6 +1164,61 @@ Svara ENDAST med JSON:
   }
 });
 
+// Suggest product_type + tags for a batch of products from their names.
+// Body: { products: [{ sku, title }], language? }. Returns { suggestions: [{ sku, product_type, tags[] }] }.
+app.post('/api/claude/suggest-taxonomy', async (req, res) => {
+  try {
+    if (!anthropic) return res.status(400).json({ error: 'API key not configured' });
+    const { products, language } = req.body;
+    const MAX = 50;
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ error: 'products måste vara en icke-tom lista' });
+    }
+    if (products.length > MAX) {
+      return res.status(413).json({ error: `Max ${MAX} produkter per anrop (fick ${products.length})` });
+    }
+
+    const list = products
+      .map((p, i) => `${i + 1}. SKU ${String(p.sku || '').trim()}: ${String(p.title || '').trim()}`)
+      .join('\n');
+
+    const prompt = `Du är en e-handelskatalog-expert. För varje produkt nedan, härled produkttyp och relevanta taggar utifrån namnet. Produkttyp = den generiska varukategorin (t.ex. "Urna", "Bordslampa", "Kuddfodral"). Taggar = 3-6 korta, sökbara ${language === 'en' ? 'English' : 'svenska'} ord (material, färg, stil, rum, användning) — inga varumärkesnamn som taggar.
+
+Produkter:
+${list}
+
+Svara ENBART med giltig JSON, en post per produkt i samma ordning:
+{"suggestions":[{"sku":"...","product_type":"...","tags":["...","..."]}]}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = response.content[0].text;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    let suggestions = [];
+    if (jsonMatch) {
+      try { suggestions = JSON.parse(jsonMatch[0]).suggestions || []; } catch { suggestions = []; }
+    }
+    // Normalize: strip any HTML the model may have slipped into fields.
+    suggestions = suggestions.map(s => ({
+      sku: String(s.sku || '').trim(),
+      product_type: sanitizeHtmlLib(String(s.product_type || ''), { allowedTags: [], allowedAttributes: {} }).trim(),
+      tags: Array.isArray(s.tags)
+        ? s.tags.map(t => sanitizeHtmlLib(String(t), { allowedTags: [], allowedAttributes: {} }).trim()).filter(Boolean)
+        : [],
+    }));
+
+    res.json({ suggestions });
+  } catch (error) {
+    console.error('Suggest taxonomy error:', error);
+    const msg = error.status === 529 ? 'Claude API är överbelastad. Försök igen.' : error.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
 // Parse product names from file data
 app.post('/api/claude/parse-products', async (req, res) => {
   try {
@@ -2153,13 +2208,37 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     const headers = parsed.headers;
     const resolvedSkuCol = skuColumn || headers.find(h => /sku|artnr|artikel/i.test(h)) || headers[0];
     const resolvedQtyCol = qtyColumn || headers.find(h => /qty|quantity|antal|lager|stock|saldo/i.test(h)) || headers[1];
+    // Extra columns used when creating products that don't exist in Shopify yet.
+    const nameCol = headers.find(h => /benämning|namn|name|title|produkt|beskrivning/i.test(h));
+    const eanCol = headers.find(h => /ean|barcode|gtin|streckkod/i.test(h));
+    const costCol = headers.find(h => /grundpris|inköp|cost|pris/i.test(h));
+    const weightCol = headers.find(h => /vikt|weight/i.test(h));
+    const sizeCol = headers.find(h => /storlek|mått|size|dimension/i.test(h));
 
-    // Build SKU→newQty map from CSV
+    // Parse a Swedish/European decimal ("179,00" or "179.00") to a number.
+    const parseNum = (val) => {
+      if (val == null) return null;
+      const n = parseFloat(String(val).replace(/\s/g, '').replace(',', '.'));
+      return isNaN(n) ? null : n;
+    };
+
+    // Build SKU→newQty map + full row data from CSV
     const csvMap = {};
+    const csvRows = {};
     for (const row of parsed.rows) {
       const sku = String(row[resolvedSkuCol] || '').trim();
+      if (!sku) continue;
       const qty = parseInt(row[resolvedQtyCol], 10);
-      if (sku && !isNaN(qty)) csvMap[sku] = qty;
+      if (!isNaN(qty)) csvMap[sku] = qty;
+      csvRows[sku] = {
+        sku,
+        name: nameCol ? String(row[nameCol] || '').trim() : '',
+        barcode: eanCol ? String(row[eanCol] || '').trim() : '',
+        cost: costCol ? parseNum(row[costCol]) : null,
+        weight: weightCol ? parseNum(row[weightCol]) : null,
+        size: sizeCol ? String(row[sizeCol] || '').trim() : '',
+        qty: isNaN(qty) ? null : qty,
+      };
     }
 
     const skus = Object.keys(csvMap);
@@ -2218,11 +2297,52 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
 
     diff.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
+    // Split the "not in Shopify" SKUs into two buckets:
+    //  - alreadyInPim: exist as products in this PIM store but aren't pushed yet
+    //  - newProducts:  don't exist anywhere → candidates to create from CSV data
+    let alreadyInPim = [];
+    let newProducts = [];
+    if (notFound.length) {
+      const { data: pimVariants } = await supabase
+        .from('variants')
+        .select('sku, products!inner(store_id)')
+        .in('sku', notFound)
+        .eq('products.store_id', storeId);
+      const pimSkus = new Set((pimVariants || []).map(v => v.sku));
+
+      // Default margin for the suggested selling price (cost × margin).
+      const pricing = await db.getPricingSettings(storeId).catch(() => null);
+      const defaultMargin = Number(pricing?.default_margin_multiplier) || 2.0;
+
+      for (const sku of notFound) {
+        if (pimSkus.has(sku)) { alreadyInPim.push(sku); continue; }
+        const row = csvRows[sku] || { sku };
+        const cost = row.cost;
+        const suggestedPrice = cost != null ? Math.round(cost * defaultMargin) : null;
+        newProducts.push({
+          sku,
+          title: row.name || sku,
+          barcode: row.barcode || '',
+          cost,
+          suggestedPrice,
+          margin: defaultMargin,
+          weight: row.weight,
+          size: row.size || '',
+          qty: row.qty,
+          product_type: '',
+          tags: [],
+          imageUrl: '',
+        });
+      }
+    }
+
     res.json({
       diff,
       notFound,
       duplicates,
       untracked,
+      alreadyInPim,
+      newProducts,
       headers,
       resolvedSkuCol,
       resolvedQtyCol,
@@ -2231,6 +2351,8 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       changed: diff.filter(r => r.changed).length,
       skippedDuplicate: duplicates.length,
       skippedUntracked: untracked.length,
+      newCount: newProducts.length,
+      alreadyInPimCount: alreadyInPim.length,
     });
   } catch (error) {
     console.error('Inventory preview error:', error);
@@ -2287,6 +2409,90 @@ app.post('/api/inventory/apply', async (req, res) => {
     });
   } catch (error) {
     console.error('Inventory apply error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/inventory/create-products
+// Create products (as drafts in the PIM) for SKUs found in the CSV but not in
+// Shopify. Price is derived from the pricing engine: default_cost = CSV cost,
+// selling price = cost × margin (2.0 global default) unless an explicit price
+// is provided (which is stored as a per-product margin override).
+app.post('/api/inventory/create-products', async (req, res) => {
+  try {
+    const { storeId, products } = req.body;
+    if (!storeId || !Array.isArray(products) || !products.length) {
+      return res.status(400).json({ error: 'storeId och products[] krävs' });
+    }
+    const MAX = 500;
+    if (products.length > MAX) {
+      return res.status(413).json({ error: `Max ${MAX} produkter per körning (fick ${products.length})` });
+    }
+
+    const pricing = await db.getPricingSettings(storeId).catch(() => null);
+    const defaultMargin = Number(pricing?.default_margin_multiplier) || 2.0;
+
+    const created = [];
+    const errors = [];
+
+    for (const p of products) {
+      const sku = String(p.sku || '').trim();
+      try {
+        if (!sku) { errors.push({ sku: p.sku, error: 'SKU saknas' }); continue; }
+
+        const cost = p.cost != null && p.cost !== '' ? Number(p.cost) : null;
+        const explicitPrice = p.price != null && p.price !== '' ? Number(p.price) : null;
+        const price = explicitPrice != null
+          ? explicitPrice
+          : (cost != null ? Math.round(cost * defaultMargin) : null);
+
+        // If the user set a price that differs from cost × default margin, store
+        // the implied margin so the pricing engine reproduces it later.
+        let marginOverride = null;
+        if (cost && explicitPrice != null && Math.round(cost * defaultMargin) !== Math.round(explicitPrice)) {
+          marginOverride = Number((explicitPrice / cost).toFixed(3));
+        }
+
+        const tags = Array.isArray(p.tags)
+          ? p.tags
+          : (p.tags ? String(p.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
+
+        const productData = sanitizeHtmlFields({
+          title: String(p.title || sku),
+          sku,
+          barcode: p.barcode ? String(p.barcode) : null,
+          product_type: p.product_type || null,
+          tags,
+          default_cost: cost,
+          default_price: price,
+          margin_multiplier: marginOverride,
+          weight: p.weight != null && p.weight !== '' ? Number(p.weight) : null,
+          status: 'draft',
+          store_id: storeId,
+          variants: [{
+            sku,
+            barcode: p.barcode ? String(p.barcode) : null,
+            price,
+            cost,
+            inventory_quantity: p.qty != null ? Number(p.qty) : 0,
+          }],
+          images: p.imageUrl
+            ? [{ url: String(p.imageUrl).trim(), alt_text: String(p.title || sku) }]
+            : [],
+        });
+
+        const createdProduct = await db.createProduct(productData);
+        // Let the pricing engine set the canonical price (applies category rules etc.)
+        try { await db.recomputeProductPrice(createdProduct.id, storeId); } catch (_) {}
+        created.push({ id: createdProduct.id, sku });
+      } catch (err) {
+        errors.push({ sku, error: err.message });
+      }
+    }
+
+    res.json({ created: created.length, failed: errors.length, errors, ids: created });
+  } catch (error) {
+    console.error('Create products error:', error);
     res.status(500).json({ error: error.message });
   }
 });

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, RefreshCw, CheckCircle2, ArrowUp, ArrowDown, Minus } from 'lucide-react';
+import { Upload, RefreshCw, CheckCircle2, ArrowUp, ArrowDown, Minus, Sparkles, PackagePlus } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
@@ -14,6 +14,14 @@ export default function InventorySync() {
   const [loading, setLoading] = useState('');
   const [toast, setToast] = useState(null);
   const fileRef = useRef();
+
+  // "Create new" tab state
+  const [activeTab, setActiveTab] = useState('update');
+  const [newRows, setNewRows] = useState([]);
+  const [newSelected, setNewSelected] = useState(new Set());
+  const [aiLoading, setAiLoading] = useState(false);
+  const [bulkType, setBulkType] = useState('');
+  const [bulkTags, setBulkTags] = useState('');
 
   useEffect(() => {
     fetch(`${API_URL}/db/stores`)
@@ -37,6 +45,8 @@ export default function InventorySync() {
     setFile(f);
     setDiff(null);
     setSelected(new Set());
+    setNewRows([]);
+    setNewSelected(new Set());
 
     const formData = new FormData();
     formData.append('file', f);
@@ -70,6 +80,16 @@ export default function InventorySync() {
       setDiff(data);
       const changedSkus = new Set((data.diff || []).filter(row => row.changed).map(r => r.sku));
       setSelected(changedSkus);
+      // Seed the editable "create new" rows (tags kept as a comma string for editing).
+      const nrows = (data.newProducts || []).map(p => ({
+        ...p,
+        price: p.suggestedPrice,
+        tags: Array.isArray(p.tags) ? p.tags.join(', ') : (p.tags || ''),
+      }));
+      setNewRows(nrows);
+      setNewSelected(new Set(nrows.map(r => r.sku)));
+      const hasChanges = (data.diff || []).some(r => r.changed);
+      setActiveTab(hasChanges ? 'update' : (nrows.length ? 'create' : 'update'));
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -100,10 +120,8 @@ export default function InventorySync() {
         `${data.updated} produkter uppdaterade i Shopify${data.failed ? `, ${data.failed} misslyckades` : ''}`,
         data.failed ? 'warning' : 'success'
       );
-      setDiff(null);
-      setFile(null);
+      setDiff(prev => prev ? { ...prev, diff: prev.diff.map(r => selected.has(r.sku) ? { ...r, currentQty: r.newQty, delta: 0, changed: false } : r) } : prev);
       setSelected(new Set());
-      if (fileRef.current) fileRef.current.value = '';
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -134,6 +152,105 @@ export default function InventorySync() {
     });
   };
 
+  // ---- Create-new helpers ----
+  const updateNewRow = (sku, field, value) =>
+    setNewRows(rows => rows.map(r => (r.sku === sku ? { ...r, [field]: value } : r)));
+
+  const toggleNewRow = (sku) =>
+    setNewSelected(prev => {
+      const next = new Set(prev);
+      next.has(sku) ? next.delete(sku) : next.add(sku);
+      return next;
+    });
+
+  const allNewSelected = newRows.length > 0 && newRows.every(r => newSelected.has(r.sku));
+  const toggleAllNew = () =>
+    setNewSelected(prev => (allNewSelected ? new Set() : new Set(newRows.map(r => r.sku))));
+
+  const applyBulk = () => {
+    if (!bulkType && !bulkTags) return;
+    setNewRows(rows => rows.map(r => {
+      if (!newSelected.has(r.sku)) return r;
+      return {
+        ...r,
+        product_type: bulkType || r.product_type,
+        tags: bulkTags ? (r.tags ? `${r.tags}, ${bulkTags}` : bulkTags) : r.tags,
+      };
+    }));
+    setBulkType('');
+    setBulkTags('');
+  };
+
+  const suggestWithAI = async () => {
+    const targets = newRows.filter(r => newSelected.has(r.sku));
+    if (!targets.length) return;
+    setAiLoading(true);
+    try {
+      const chunkSize = 50;
+      const bySku = {};
+      for (let i = 0; i < targets.length; i += chunkSize) {
+        const chunk = targets.slice(i, i + chunkSize).map(r => ({ sku: r.sku, title: r.title }));
+        const r = await fetch(`${API_URL}/claude/suggest-taxonomy`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ products: chunk }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'AI-fel');
+        for (const s of (data.suggestions || [])) bySku[s.sku] = s;
+      }
+      setNewRows(rows => rows.map(r => (bySku[r.sku] ? {
+        ...r,
+        product_type: bySku[r.sku].product_type || r.product_type,
+        tags: (bySku[r.sku].tags || []).join(', ') || r.tags,
+      } : r)));
+      showToast(`Förslag ifyllda för ${Object.keys(bySku).length} produkter`);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const createProducts = async () => {
+    const targets = newRows.filter(r => newSelected.has(r.sku)).map(r => ({
+      sku: r.sku,
+      title: r.title,
+      barcode: r.barcode,
+      cost: r.cost,
+      price: r.price,
+      weight: r.weight,
+      qty: r.qty,
+      product_type: r.product_type,
+      tags: r.tags ? r.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      imageUrl: r.imageUrl,
+    }));
+    if (!targets.length) return;
+    setLoading('create');
+    try {
+      let created = 0, failed = 0;
+      const chunk = 200;
+      for (let i = 0; i < targets.length; i += chunk) {
+        const r = await fetch(`${API_URL}/inventory/create-products`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ storeId, products: targets.slice(i, i + chunk) }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Fel vid skapande');
+        created += data.created || 0;
+        failed += data.failed || 0;
+      }
+      showToast(`${created} produkter skapade som utkast${failed ? `, ${failed} misslyckades` : ''}`, failed ? 'warning' : 'success');
+      setNewRows(rows => rows.filter(r => !newSelected.has(r.sku)));
+      setNewSelected(new Set());
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
+
   return (
     <div className="margin-engine">
       {toast && (
@@ -145,7 +262,7 @@ export default function InventorySync() {
       <div className="content-header">
         <div>
           <h1 className="content-title">Uppdatera lagersaldo</h1>
-          <p className="content-subtitle">Ladda upp leverantörens lagerfil och synka direkt till Shopify.</p>
+          <p className="content-subtitle">Ladda upp leverantörens lagerfil, synka saldon och skapa produkter som saknas i Shopify.</p>
         </div>
       </div>
 
@@ -231,118 +348,195 @@ export default function InventorySync() {
       {/* Results */}
       {diff && (
         <section className="settings-section">
-          <div className="settings-header" style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <div>
-              <div className="settings-title">3. Granska & uppdatera</div>
-              <div className="settings-description">
+          {/* Tabs */}
+          <div className="settings-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              className={`btn ${activeTab === 'update' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setActiveTab('update')}
+            >
+              Uppdatera lager ({diff.changed || 0})
+            </button>
+            <button
+              className={`btn ${activeTab === 'create' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setActiveTab('create')}
+            >
+              <PackagePlus size={14} /> Skapa nya ({diff.newCount || 0})
+            </button>
+            {diff.alreadyInPimCount > 0 && (
+              <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-secondary, #888)' }}>
+                {diff.alreadyInPimCount} finns redan i PIM (ej pushade)
+              </span>
+            )}
+          </div>
+
+          {/* ---- UPDATE STOCK TAB ---- */}
+          {activeTab === 'update' && (
+            <div className="settings-body">
+              <div className="settings-description" style={{ marginBottom: 12 }}>
                 {diff.matched} matchade &nbsp;·&nbsp;
                 <span style={{ color: diff.changed > 0 ? '#f59e0b' : 'inherit' }}>{diff.changed} med förändring</span>
-                {diff.notFound?.length > 0 && (
-                  <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.notFound.length} ej i Shopify</span>
-                )}
-                {diff.skippedDuplicate > 0 && (
-                  <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.skippedDuplicate} SKU-dubletter</span>
-                )}
-                {diff.skippedUntracked > 0 && (
-                  <span style={{ color: 'var(--text-secondary, #888)' }}>&nbsp;·&nbsp;{diff.skippedUntracked} otrackade</span>
-                )}
+                {diff.notFound?.length > 0 && <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.notFound.length} ej i Shopify</span>}
+                {diff.skippedDuplicate > 0 && <span style={{ color: '#ef4444' }}>&nbsp;·&nbsp;{diff.skippedDuplicate} SKU-dubletter</span>}
+                {diff.skippedUntracked > 0 && <span style={{ color: 'var(--text-secondary, #888)' }}>&nbsp;·&nbsp;{diff.skippedUntracked} otrackade</span>}
+                <label style={{ marginLeft: 16, fontSize: 13, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={onlyChanged} onChange={e => setOnlyChanged(e.target.checked)} /> Visa bara förändrade
+                </label>
               </div>
-            </div>
-            <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}>
-              <input type="checkbox" checked={onlyChanged} onChange={e => setOnlyChanged(e.target.checked)} />
-              Visa bara förändrade
-            </label>
-          </div>
 
-          <div className="settings-body">
-            {visibleRows.length > 0 ? (
-              <>
-                <div style={{ overflowX: 'auto' }}>
-                  <table className="margin-table">
-                    <thead>
-                      <tr>
-                        <th><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
-                        <th>SKU</th>
-                        <th>Produkt</th>
-                        <th className="num">Nuvarande</th>
-                        <th className="num">Ny</th>
-                        <th className="num">Förändring</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleRows.map(row => (
-                        <tr key={row.sku} className={selected.has(row.sku) ? 'selected' : ''}>
-                          <td>
-                            <input
-                              type="checkbox"
-                              checked={selected.has(row.sku)}
-                              onChange={() => toggleRow(row.sku)}
-                            />
-                          </td>
-                          <td><code style={{ fontSize: 12 }}>{row.sku}</code></td>
-                          <td style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {row.productTitle || '—'}
-                          </td>
-                          <td className="num">{row.currentQty}</td>
-                          <td className="num">{row.newQty}</td>
-                          <td className="num"><DeltaBadge delta={row.delta} /></td>
+              {visibleRows.length > 0 ? (
+                <>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="margin-table">
+                      <thead>
+                        <tr>
+                          <th><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
+                          <th>SKU</th>
+                          <th>Produkt</th>
+                          <th className="num">Nuvarande</th>
+                          <th className="num">Ny</th>
+                          <th className="num">Förändring</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {visibleRows.map(row => (
+                          <tr key={row.sku} className={selected.has(row.sku) ? 'selected' : ''}>
+                            <td><input type="checkbox" checked={selected.has(row.sku)} onChange={() => toggleRow(row.sku)} /></td>
+                            <td><code style={{ fontSize: 12 }}>{row.sku}</code></td>
+                            <td style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.productTitle || '—'}</td>
+                            <td className="num">{row.currentQty}</td>
+                            <td className="num">{row.newQty}</td>
+                            <td className="num"><DeltaBadge delta={row.delta} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
 
-                {selected.size > 0 && (
-                  <div className="bulk-bar" style={{ marginTop: 12 }}>
-                    <span style={{ fontSize: 13 }}>{selected.size} valda</span>
-                    <button className="btn btn-primary" onClick={handleApply} disabled={!!loading}>
-                      {loading === 'apply'
-                        ? <RefreshCw size={14} className="spin" />
-                        : <CheckCircle2 size={14} />}
-                      {loading === 'apply' ? 'Uppdaterar...' : 'Uppdatera lagersaldo i Shopify'}
+                  {selected.size > 0 && (
+                    <div className="bulk-bar" style={{ marginTop: 12 }}>
+                      <span style={{ fontSize: 13 }}>{selected.size} valda</span>
+                      <button className="btn btn-primary" onClick={handleApply} disabled={!!loading}>
+                        {loading === 'apply' ? <RefreshCw size={14} className="spin" /> : <CheckCircle2 size={14} />}
+                        {loading === 'apply' ? 'Uppdaterar...' : 'Uppdatera lagersaldo i Shopify'}
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary, #888)' }}>
+                  Inga förändringar i lagersaldo.
+                </div>
+              )}
+
+              {diff.notFound?.length > 0 && (
+                <details style={{ marginTop: 12 }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary, #888)' }}>
+                    SKUs som saknas i Shopify ({diff.notFound.length}) — se fliken "Skapa nya"
+                  </summary>
+                  <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
+                    {diff.notFound.join(', ')}
+                  </p>
+                </details>
+              )}
+              {diff.duplicates?.length > 0 && (
+                <details style={{ marginTop: 12 }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 13, color: '#ef4444' }}>
+                    SKU-dubletter i Shopify — hoppas över, rensa manuellt ({diff.duplicates.length})
+                  </summary>
+                  <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
+                    {diff.duplicates.join(', ')}
+                  </p>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* ---- CREATE NEW TAB ---- */}
+          {activeTab === 'create' && (
+            <div className="settings-body">
+              {newRows.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary, #888)' }}>
+                  Inga nya produkter att skapa.
+                </div>
+              ) : (
+                <>
+                  <div className="settings-description" style={{ marginBottom: 12 }}>
+                    {newRows.length} produkter i CSV:n saknas i Shopify. Justera pris, typ, taggar och bildlänk och skapa dem som utkast. Pris = inköp × {newRows[0]?.margin ?? 2.0} som standard.
+                  </div>
+
+                  {/* Bulk toolbar */}
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Sätt typ på valda</label>
+                      <input className="form-input" value={bulkType} onChange={e => setBulkType(e.target.value)} placeholder="t.ex. Urna" style={{ width: 150 }} />
+                    </div>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Lägg taggar på valda</label>
+                      <input className="form-input" value={bulkTags} onChange={e => setBulkTags(e.target.value)} placeholder="komma,separerat" style={{ width: 180 }} />
+                    </div>
+                    <button className="btn btn-secondary" onClick={applyBulk} disabled={!newSelected.size || (!bulkType && !bulkTags)}>
+                      Applicera på {newSelected.size} valda
+                    </button>
+                    <button className="btn btn-secondary" onClick={suggestWithAI} disabled={aiLoading || !newSelected.size}>
+                      {aiLoading ? <RefreshCw size={14} className="spin" /> : <Sparkles size={14} />}
+                      {aiLoading ? 'Föreslår...' : 'Föreslå typ & taggar (AI)'}
                     </button>
                   </div>
-                )}
-              </>
-            ) : (
-              <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary, #888)' }}>
-                Inga förändringar i lagersaldo.
-              </div>
-            )}
 
-            {diff.notFound?.length > 0 && (
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary, #888)' }}>
-                  SKUs som saknas i Shopify ({diff.notFound.length})
-                </summary>
-                <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
-                  {diff.notFound.join(', ')}
-                </p>
-              </details>
-            )}
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="margin-table">
+                      <thead>
+                        <tr>
+                          <th><input type="checkbox" checked={allNewSelected} onChange={toggleAllNew} /></th>
+                          <th>SKU</th>
+                          <th>Benämning</th>
+                          <th className="num">Inköp</th>
+                          <th className="num">Pris</th>
+                          <th>Typ</th>
+                          <th>Taggar</th>
+                          <th>Bildlänk</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {newRows.map(row => (
+                          <tr key={row.sku} className={newSelected.has(row.sku) ? 'selected' : ''}>
+                            <td><input type="checkbox" checked={newSelected.has(row.sku)} onChange={() => toggleNewRow(row.sku)} /></td>
+                            <td><code style={{ fontSize: 12 }}>{row.sku}</code></td>
+                            <td>
+                              <input className="form-input" value={row.title} onChange={e => updateNewRow(row.sku, 'title', e.target.value)} style={{ minWidth: 200 }} />
+                            </td>
+                            <td className="num">{row.cost != null ? row.cost : '—'}</td>
+                            <td className="num">
+                              <input className="form-input" type="number" value={row.price ?? ''} onChange={e => updateNewRow(row.sku, 'price', e.target.value)} style={{ width: 80, textAlign: 'right' }} />
+                            </td>
+                            <td>
+                              <input className="form-input" value={row.product_type} onChange={e => updateNewRow(row.sku, 'product_type', e.target.value)} placeholder="typ" style={{ width: 120 }} />
+                            </td>
+                            <td>
+                              <input className="form-input" value={row.tags} onChange={e => updateNewRow(row.sku, 'tags', e.target.value)} placeholder="tagg1, tagg2" style={{ minWidth: 160 }} />
+                            </td>
+                            <td>
+                              <input className="form-input" value={row.imageUrl} onChange={e => updateNewRow(row.sku, 'imageUrl', e.target.value)} placeholder="https://..." style={{ minWidth: 160 }} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
 
-            {diff.duplicates?.length > 0 && (
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 13, color: '#ef4444' }}>
-                  SKU-dubletter i Shopify — hoppas över, rensa manuellt ({diff.duplicates.length})
-                </summary>
-                <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
-                  {diff.duplicates.join(', ')}
-                </p>
-              </details>
-            )}
-
-            {diff.untracked?.length > 0 && (
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary, #888)' }}>
-                  SKUs med lagerspårning av — hoppas över ({diff.untracked.length})
-                </summary>
-                <p style={{ fontSize: 12, marginTop: 6, color: 'var(--text-secondary, #888)', wordBreak: 'break-all' }}>
-                  {diff.untracked.join(', ')}
-                </p>
-              </details>
-            )}
-          </div>
+                  {newSelected.size > 0 && (
+                    <div className="bulk-bar" style={{ marginTop: 12 }}>
+                      <span style={{ fontSize: 13 }}>{newSelected.size} valda</span>
+                      <button className="btn btn-primary" onClick={createProducts} disabled={!!loading}>
+                        {loading === 'create' ? <RefreshCw size={14} className="spin" /> : <PackagePlus size={14} />}
+                        {loading === 'create' ? 'Skapar...' : `Skapa ${newSelected.size} som utkast`}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </section>
       )}
     </div>
