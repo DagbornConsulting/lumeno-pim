@@ -4645,6 +4645,79 @@ app.post('/api/shopify/stores/:storeId/products/:productId/push-safe', async (re
   }
 });
 
+// POST /api/shopify/stores/:storeId/relink-by-sku
+// Repair PIM<->Shopify links by matching on SKU against the live catalog. Fixes
+// stale shopify_product_id (e.g. after a store rebuild) and creates links for
+// unlinked products. Must run before baseline/sync when links are stale.
+app.post('/api/shopify/stores/:storeId/relink-by-sku', async (req, res) => {
+  try {
+    const { storeId } = req.params;
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+
+    const skuMap = await shopifySync.fetchSkuToProductId(store);
+
+    // Paginate — Supabase caps a single select at 1000 rows.
+    const products = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from('products')
+        .select('id, sku, variants(sku)')
+        .eq('store_id', storeId)
+        .range(from, from + 999);
+      if (error) throw error;
+      products.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+
+    const existingLinks = [];
+    for (let from = 0; ; from += 1000) {
+      const { data } = await supabase
+        .from('store_products')
+        .select('product_id, shopify_product_id')
+        .eq('store_id', storeId)
+        .range(from, from + 999);
+      existingLinks.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    const linkByProduct = new Map(existingLinks.map(l => [l.product_id, l]));
+
+    let relinked = 0, created = 0, unchanged = 0, unmatched = 0, noSku = 0, failed = 0;
+    const errors = [];
+
+    for (const p of (products || [])) {
+      const sku = (p.sku || (p.variants || []).map(v => v.sku).find(Boolean) || '').trim();
+      if (!sku) { noSku++; continue; }
+      const shId = skuMap.get(sku);
+      if (!shId) { unmatched++; continue; }
+      const existing = linkByProduct.get(p.id);
+      if (existing && String(existing.shopify_product_id) === shId) { unchanged++; continue; }
+      try {
+        await supabase.from('store_products').upsert({
+          product_id: p.id,
+          store_id: storeId,
+          shopify_product_id: Number(shId),
+          shopify_product_gid: `gid://shopify/Product/${shId}`,
+        }, { onConflict: 'store_id,product_id' });
+        if (existing) relinked++; else created++;
+      } catch (e) {
+        failed++;
+        errors.push({ productId: p.id, error: e.message });
+      }
+    }
+
+    res.json({
+      liveSkus: skuMap.size,
+      pimProducts: (products || []).length,
+      relinked, created, unchanged, unmatched, noSku, failed,
+      errors: errors.slice(0, 20),
+    });
+  } catch (error) {
+    console.error('relink-by-sku error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // POST /api/shopify/stores/:storeId/capture-baseline
 // Establish sync baselines for products already in the PIM: bulk-fetch the
 // catalog content from Shopify, mirror it into the PIM (so no Shopify content
@@ -4660,14 +4733,20 @@ app.post('/api/shopify/stores/:storeId/capture-baseline', async (req, res) => {
     // Fast bulk read of the whole catalog from Shopify.
     const contentById = await shopifySync.fetchAllProductsContent(store);
 
-    let q = supabase
-      .from('store_products')
-      .select('id, product_id, shopify_product_id, products!inner(id, metafields)')
-      .eq('store_id', storeId)
-      .not('shopify_product_id', 'is', null);
-    if (Array.isArray(productIds) && productIds.length) q = q.in('product_id', productIds);
-    const { data: links, error } = await q;
-    if (error) throw error;
+    const links = [];
+    for (let from = 0; ; from += 1000) {
+      let q = supabase
+        .from('store_products')
+        .select('id, product_id, shopify_product_id, products!inner(id, metafields)')
+        .eq('store_id', storeId)
+        .not('shopify_product_id', 'is', null)
+        .range(from, from + 999);
+      if (Array.isArray(productIds) && productIds.length) q = q.in('product_id', productIds);
+      const { data, error } = await q;
+      if (error) throw error;
+      links.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
 
     let updated = 0, notInShopify = 0, failed = 0;
     const errors = [];

@@ -1059,6 +1059,45 @@ export const shopifySync = {
     };
   },
 
+  // Build a live SKU -> numeric Shopify product id map (first variant wins).
+  // Used to re-link PIM products to the current Shopify catalog by SKU.
+  async fetchSkuToProductId(store) {
+    const client = this.getClient(store);
+    const map = new Map();
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    let cursor = null;
+    while (true) {
+      let d;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          d = await client.graphql(
+            `query($c: String) {
+              products(first: 100, after: $c) {
+                nodes { id variants(first: 100) { nodes { sku } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }`,
+            { c: cursor }
+          );
+          break;
+        } catch (e) {
+          if (attempt < 5 && /THROTTLED|throttl/i.test(String(e.message))) { await sleep(2000); continue; }
+          throw e;
+        }
+      }
+      for (const p of d.products.nodes) {
+        const numId = String(p.id).replace(/\D/g, '');
+        for (const v of p.variants.nodes) {
+          const sku = (v.sku || '').trim();
+          if (sku && !map.has(sku)) map.set(sku, numId);
+        }
+      }
+      if (!d.products.pageInfo.hasNextPage) break;
+      cursor = d.products.pageInfo.endCursor;
+    }
+    return map;
+  },
+
   // Bulk-fetch managed content + metafields for the whole catalog via GraphQL
   // (fast — ~1 call per 100 products). Returns Map<numericShopifyId, content>,
   // content in the sync-engine shape. Used to backfill baselines for the catalog.
