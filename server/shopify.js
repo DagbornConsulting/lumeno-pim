@@ -1042,6 +1042,24 @@ export const shopifySync = {
     return num ? `gid://shopify/Location/${num}` : null;
   },
 
+  // Fetch a product's metafield VALUES from Shopify as a PIM JSONB map
+  // ({ "namespace.key": value }). JSON/list-typed values are parsed to objects.
+  async getProductMetafields(store, shopifyProductId) {
+    const client = this.getClient(store);
+    const numId = String(shopifyProductId).replace(/\D/g, '');
+    const data = await client.request(`/products/${numId}/metafields.json?limit=250`);
+    const map = {};
+    for (const m of (data.metafields || [])) {
+      const full = `${m.namespace}.${m.key}`;
+      let value = m.value;
+      if (m.type && (m.type === 'json' || m.type.startsWith('list.'))) {
+        try { value = JSON.parse(m.value); } catch { /* keep raw string */ }
+      }
+      map[full] = value;
+    }
+    return map;
+  },
+
   // Build a live SKU -> variants map straight from Shopify, independent of local
   // sync state. Returns each variant's inventoryItem GID, current qty and tracked
   // flag, plus the list of SKUs that map to more than one variant (ambiguous).

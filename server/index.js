@@ -4388,6 +4388,14 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
           shopify_image_id: String(img.id),
         }));
 
+        // Pull the product's metafield values from Shopify too.
+        let metafields = {};
+        try {
+          metafields = await shopifySync.getProductMetafields(store, sp.id);
+        } catch (e) {
+          console.warn(`metafield import for #${shopifyId}:`, e.message);
+        }
+
         const pimProduct = {
           store_id: storeId,
           title: sp.title,
@@ -4396,6 +4404,7 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
           description: sp.body_html || '',
           tags: sp.tags ? sp.tags.split(', ').filter(Boolean) : [],
           status: sp.status === 'active' ? 'active' : 'draft',
+          metafields,
           variants,
           images,
         };
@@ -4425,6 +4434,67 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
   } catch (err) {
     console.error('import-from-shopify error:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/shopify/stores/:storeId/import-metafields
+// Pull Shopify metafield VALUES into PIM for products already linked to the
+// store, merging them into products.metafields (Shopify is source of truth on
+// import). Runs in bounded batches to respect Shopify's REST rate limit and
+// serverless timeouts — returns `remaining` so it can be called repeatedly.
+// Body: { productIds?: [...], limit? }  (omit productIds to backfill all linked)
+app.post('/api/shopify/stores/:storeId/import-metafields', async (req, res) => {
+  try {
+    const { storeId } = req.params;
+    const { productIds, limit } = req.body || {};
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+
+    const batchLimit = Math.min(Number(limit) || 50, 100);
+
+    // Linked products to process (optionally a specific subset).
+    let q = supabase
+      .from('store_products')
+      .select('product_id, shopify_product_id, products!inner(id, metafields)')
+      .eq('store_id', storeId)
+      .not('shopify_product_id', 'is', null);
+    if (Array.isArray(productIds) && productIds.length) q = q.in('product_id', productIds);
+    const { data: allLinks, error } = await q;
+    if (error) throw error;
+
+    const links = (allLinks || []).slice(0, batchLimit);
+    const remaining = Math.max(0, (allLinks || []).length - links.length);
+
+    let updated = 0, unchanged = 0, failed = 0, notInShopify = 0, totalFields = 0;
+    const errors = [];
+
+    for (const link of links) {
+      try {
+        const shopMeta = await shopifySync.getProductMetafields(store, link.shopify_product_id);
+        const keys = Object.keys(shopMeta);
+        if (!keys.length) { unchanged++; continue; }
+        const current = link.products?.metafields || {};
+        const merged = { ...current, ...shopMeta };
+        if (JSON.stringify(merged) === JSON.stringify(current)) { unchanged++; continue; }
+        const { error: upErr } = await supabase.from('products').update({ metafields: merged }).eq('id', link.product_id);
+        if (upErr) throw upErr;
+        updated++;
+        totalFields += keys.length;
+        // Pace REST calls (~2/s) to stay within Shopify's rate limit.
+        await new Promise(r => setTimeout(r, 500));
+      } catch (e) {
+        // A 404 means the linked product no longer exists in Shopify (stale link),
+        // not a real failure — count it separately so the report stays clean.
+        if (/\b404\b/.test(e.message)) { notInShopify++; continue; }
+        failed++;
+        errors.push({ productId: link.product_id, error: e.message });
+      }
+    }
+
+    res.json({ processed: links.length, updated, unchanged, failed, notInShopify, totalFields, remaining, errors: errors.slice(0, 20) });
+  } catch (error) {
+    console.error('import-metafields error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
