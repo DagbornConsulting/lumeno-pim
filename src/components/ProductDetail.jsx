@@ -10,6 +10,7 @@ import {
 import { generateHandle } from '../data/demoData';
 import CategoryPicker from './CategoryPicker';
 import MetafieldsTab from './MetafieldsTab';
+import SyncReview from './SyncReview';
 import {
   resolveMargin, computePricing, fmtKr, fmtPct,
   DEFAULT_MARGIN, DEFAULT_VAT_RATE,
@@ -497,6 +498,7 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
     { id: 'google', label: 'Google Shopping', icon: ShoppingBag },
     { id: 'google-ads', label: 'Google Ads', icon: Megaphone },
     { id: 'quality', label: 'Kvalitet', icon: CheckCircle2 },
+    { id: 'sync', label: 'Synk', icon: RefreshCw },
     { id: 'publish', label: 'Publicera', icon: Globe },
   ];
 
@@ -2175,6 +2177,17 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
                   );
                 })()}
               </div>
+            </div>
+          )}
+
+          {/* Sync / Review Tab */}
+          {activeTab === 'sync' && (
+            <div className="tab-content">
+              {stores?.[0]?.id ? (
+                <SyncReview storeId={stores[0].id} productId={product.id} />
+              ) : (
+                <p className="form-section-description">Ingen butik kopplad — kan inte jämföra mot Shopify.</p>
+              )}
             </div>
           )}
 
