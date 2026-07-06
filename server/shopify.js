@@ -1059,6 +1059,64 @@ export const shopifySync = {
     };
   },
 
+  // Bulk-fetch managed content + metafields for the whole catalog via GraphQL
+  // (fast — ~1 call per 100 products). Returns Map<numericShopifyId, content>,
+  // content in the sync-engine shape. Used to backfill baselines for the catalog.
+  async fetchAllProductsContent(store) {
+    const client = this.getClient(store);
+    const byId = new Map();
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    let cursor = null;
+
+    while (true) {
+      let d;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          d = await client.graphql(
+            `query($c: String) {
+              products(first: 100, after: $c) {
+                nodes {
+                  id title descriptionHtml productType tags
+                  metafields(first: 50) { nodes { namespace key value type } }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }`,
+            { c: cursor }
+          );
+          break;
+        } catch (e) {
+          if (attempt < 5 && /THROTTLED|throttl/i.test(String(e.message))) { await sleep(2000); continue; }
+          throw e;
+        }
+      }
+
+      for (const p of d.products.nodes) {
+        const numId = String(p.id).replace(/\D/g, '');
+        const metafields = {};
+        for (const m of (p.metafields?.nodes || [])) {
+          const full = `${m.namespace}.${m.key}`;
+          let value = m.value;
+          if (m.type && (m.type === 'json' || m.type.startsWith('list.'))) {
+            try { value = JSON.parse(m.value); } catch { /* keep raw */ }
+          }
+          metafields[full] = value;
+        }
+        byId.set(numId, {
+          title: p.title || '',
+          body_html: p.descriptionHtml || '',
+          product_type: p.productType || '',
+          tags: p.tags || [],
+          metafields,
+        });
+      }
+
+      if (!d.products.pageInfo.hasNextPage) break;
+      cursor = d.products.pageInfo.endCursor;
+    }
+    return byId;
+  },
+
   // Push ONLY the given fields/tags/metafields to a product (field-level PUT).
   // Untouched fields are never sent, so Shopify-side values we didn't change
   // are left intact.

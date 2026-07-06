@@ -4645,6 +4645,71 @@ app.post('/api/shopify/stores/:storeId/products/:productId/push-safe', async (re
   }
 });
 
+// POST /api/shopify/stores/:storeId/capture-baseline
+// Establish sync baselines for products already in the PIM: bulk-fetch the
+// catalog content from Shopify, mirror it into the PIM (so no Shopify content
+// is lost), and set baseline = current Shopify state — a clean, conflict-free
+// starting point. Body: { productIds?: [...], refreshPim?: true }
+app.post('/api/shopify/stores/:storeId/capture-baseline', async (req, res) => {
+  try {
+    const { storeId } = req.params;
+    const { productIds, refreshPim = true } = req.body || {};
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+
+    // Fast bulk read of the whole catalog from Shopify.
+    const contentById = await shopifySync.fetchAllProductsContent(store);
+
+    let q = supabase
+      .from('store_products')
+      .select('id, product_id, shopify_product_id, products!inner(id, metafields)')
+      .eq('store_id', storeId)
+      .not('shopify_product_id', 'is', null);
+    if (Array.isArray(productIds) && productIds.length) q = q.in('product_id', productIds);
+    const { data: links, error } = await q;
+    if (error) throw error;
+
+    let updated = 0, notInShopify = 0, failed = 0;
+    const errors = [];
+
+    for (const link of (links || [])) {
+      const content = contentById.get(String(link.shopify_product_id));
+      if (!content) { notInShopify++; continue; }
+      try {
+        if (refreshPim) {
+          await supabase.from('products').update({
+            title: content.title,
+            description: content.body_html,
+            product_type: content.product_type,
+            tags: content.tags,
+            metafields: { ...(link.products?.metafields || {}), ...content.metafields },
+          }).eq('id', link.product_id);
+        }
+        await supabase.from('store_products').update({
+          shopify_baseline: content,
+          baseline_synced_at: new Date().toISOString(),
+          sync_status: 'synced',
+          conflict_fields: null,
+        }).eq('id', link.id);
+        updated++;
+      } catch (e) {
+        failed++;
+        errors.push({ productId: link.product_id, error: e.message });
+      }
+    }
+
+    res.json({
+      catalogFetched: contentById.size,
+      processed: (links || []).length,
+      updated, notInShopify, failed,
+      errors: errors.slice(0, 20),
+    });
+  } catch (error) {
+    console.error('capture-baseline error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Delete a store (admin only)
 app.delete('/api/db/stores/:id', requireAdmin, async (req, res) => {
   try {
