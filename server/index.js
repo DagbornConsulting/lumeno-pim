@@ -15,6 +15,7 @@ import shopifySync, { SyncWorker } from './shopify.js';
 import shopifyApp from './shopify-app.js';
 import { processImage, downloadImage, generateAltText, getImageMetadata } from './services/image-processor.js';
 import { feedService } from './feed-generator.js';
+import { computeProductDiff, buildSyncPlan } from './services/sync-engine.js';
 
 // Heavy modules — loaded in the background so they don't block cold-start parsing
 let anthropic = null;
@@ -4411,7 +4412,8 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
 
         const created_product = await db.createProduct(pimProduct);
 
-        // Link to store via store_products
+        // Link to store via store_products, capturing the imported content as
+        // the sync baseline (last-known Shopify state) for conflict detection.
         await supabase.from('store_products').upsert({
           product_id: created_product.id,
           store_id: storeId,
@@ -4420,6 +4422,14 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
           sync_status: 'synced',
           is_published: sp.status === 'active',
           last_synced_at: new Date().toISOString(),
+          shopify_baseline: {
+            title: sp.title || '',
+            body_html: sp.body_html || '',
+            product_type: sp.product_type || '',
+            tags: pimProduct.tags,
+            metafields,
+          },
+          baseline_synced_at: new Date().toISOString(),
         }, { onConflict: 'store_id,product_id' });
 
         created++;
@@ -4494,6 +4504,143 @@ app.post('/api/shopify/stores/:storeId/import-metafields', async (req, res) => {
     res.json({ processed: links.length, updated, unchanged, failed, notInShopify, totalFields, remaining, errors: errors.slice(0, 20) });
   } catch (error) {
     console.error('import-metafields error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// NON-DESTRUCTIVE SYNC (baseline + conflict detection)
+// ============================================
+
+// Build the sync-engine content shape from a PIM product row.
+const pimContentOf = (product) => ({
+  title: product.title || '',
+  body_html: product.description || '',
+  product_type: product.product_type || '',
+  tags: Array.isArray(product.tags) ? product.tags : (product.tags ? [product.tags] : []),
+  metafields: product.metafields || {},
+});
+
+// GET /api/shopify/stores/:storeId/products/:productId/sync-diff
+// Per-field comparison of PIM vs Shopify vs baseline. Read-only.
+app.get('/api/shopify/stores/:storeId/products/:productId/sync-diff', async (req, res) => {
+  try {
+    const { storeId, productId } = req.params;
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+
+    const product = await db.getProductById(productId);
+    if (!product) return res.status(404).json({ error: 'Produkt hittades inte' });
+
+    const { data: link } = await supabase
+      .from('store_products')
+      .select('shopify_product_id, shopify_baseline, baseline_synced_at, conflict_fields')
+      .eq('store_id', storeId).eq('product_id', productId).maybeSingle();
+    if (!link?.shopify_product_id) {
+      return res.status(400).json({ error: 'Produkten är inte kopplad till en Shopify-produkt' });
+    }
+
+    const shop = await shopifySync.fetchProductContent(store, link.shopify_product_id);
+    const diff = computeProductDiff({ pim: pimContentOf(product), shop, baseline: link.shopify_baseline });
+
+    res.json({
+      productId, storeId,
+      shopifyProductId: String(link.shopify_product_id),
+      baselineSyncedAt: link.baseline_synced_at,
+      ...diff,
+    });
+  } catch (error) {
+    console.error('sync-diff error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/shopify/stores/:storeId/products/:productId/push-safe
+// Non-destructive sync. Body: { resolutions?: { field|"metafield:key": "pim"|"shopify" }, dryRun? }
+//  - PIM-changed fields  -> pushed to Shopify (only those fields)
+//  - Shopify-changed      -> pulled into the PIM
+//  - conflicts/no-baseline -> require an explicit resolution, otherwise left untouched
+app.post('/api/shopify/stores/:storeId/products/:productId/push-safe', async (req, res) => {
+  try {
+    const { storeId, productId } = req.params;
+    const { resolutions = {}, dryRun = false } = req.body || {};
+
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+    const product = await db.getProductById(productId);
+    if (!product) return res.status(404).json({ error: 'Produkt hittades inte' });
+
+    const { data: link } = await supabase
+      .from('store_products')
+      .select('id, shopify_product_id, shopify_baseline')
+      .eq('store_id', storeId).eq('product_id', productId).maybeSingle();
+    if (!link?.shopify_product_id) return res.status(400).json({ error: 'Produkten är inte kopplad till Shopify' });
+
+    const shop = await shopifySync.fetchProductContent(store, link.shopify_product_id);
+    const diff = computeProductDiff({ pim: pimContentOf(product), shop, baseline: link.shopify_baseline });
+    const plan = buildSyncPlan(diff, resolutions);
+
+    if (dryRun) {
+      return res.json({ dryRun: true, counts: diff.counts, plan, unresolved: plan.unresolved });
+    }
+
+    // 1) Push PIM-owned changes to Shopify (only the changed fields).
+    if (plan.hasShopifyWrite) {
+      await shopifySync.updateProductContent(store, link.shopify_product_id, {
+        fields: plan.toShopify.fields,
+        tags: plan.toShopify.tags,
+        metafields: plan.toShopify.metafields,
+      });
+    }
+
+    // 2) Pull Shopify-owned changes into the PIM.
+    const pimUpdate = {};
+    if ('title' in plan.toPim.fields) pimUpdate.title = plan.toPim.fields.title;
+    if ('body_html' in plan.toPim.fields) pimUpdate.description = plan.toPim.fields.body_html;
+    if ('product_type' in plan.toPim.fields) pimUpdate.product_type = plan.toPim.fields.product_type;
+    if (plan.toPim.tags != null) pimUpdate.tags = plan.toPim.tags;
+    if (Object.keys(plan.toPim.metafields).length) {
+      pimUpdate.metafields = { ...(product.metafields || {}), ...plan.toPim.metafields };
+    }
+    if (Object.keys(pimUpdate).length) {
+      await supabase.from('products').update(pimUpdate).eq('id', productId);
+    }
+
+    // 3) Re-capture baseline from live Shopify, but preserve the old baseline for
+    // any UNRESOLVED conflict so it keeps being flagged (never silently becomes a push).
+    const fresh = await shopifySync.fetchProductContent(store, link.shopify_product_id);
+    const newBaseline = { ...fresh, metafields: { ...fresh.metafields } };
+    const oldBase = link.shopify_baseline || {};
+    for (const u of plan.unresolved) {
+      if (u.key.startsWith('metafield:')) {
+        const mk = u.key.slice('metafield:'.length);
+        if (oldBase.metafields && mk in oldBase.metafields) newBaseline.metafields[mk] = oldBase.metafields[mk];
+        else delete newBaseline.metafields[mk];
+      } else if (u.key === 'tags') {
+        if ('tags' in oldBase) newBaseline.tags = oldBase.tags;
+      } else {
+        if (u.key in oldBase) newBaseline[u.key] = oldBase[u.key];
+        else delete newBaseline[u.key];
+      }
+    }
+
+    await supabase.from('store_products').update({
+      shopify_baseline: newBaseline,
+      baseline_synced_at: new Date().toISOString(),
+      conflict_fields: plan.unresolved.length ? plan.unresolved : null,
+      sync_status: plan.unresolved.length ? 'conflict' : 'synced',
+      last_synced_at: new Date().toISOString(),
+    }).eq('id', link.id);
+
+    res.json({
+      pushedFields: Object.keys(plan.toShopify.fields).length + (plan.toShopify.tags != null ? 1 : 0),
+      pushedMetafields: Object.keys(plan.toShopify.metafields).length,
+      pulled: Object.keys(pimUpdate).length,
+      unresolved: plan.unresolved,
+      status: plan.unresolved.length ? 'conflict' : 'synced',
+    });
+  } catch (error) {
+    console.error('push-safe error:', error);
     res.status(500).json({ error: error.message });
   }
 });

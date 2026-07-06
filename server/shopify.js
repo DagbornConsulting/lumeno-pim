@@ -1042,6 +1042,46 @@ export const shopifySync = {
     return num ? `gid://shopify/Location/${num}` : null;
   },
 
+  // Fetch the managed CONTENT of a product from Shopify in the sync-engine shape:
+  // { title, body_html, product_type, tags: [...], metafields: { "ns.key": value } }.
+  async fetchProductContent(store, shopifyProductId) {
+    const client = this.getClient(store);
+    const numId = String(shopifyProductId).replace(/\D/g, '');
+    const data = await client.request(`/products/${numId}.json?fields=id,title,body_html,product_type,tags`);
+    const p = data.product || {};
+    const metafields = await this.getProductMetafields(store, numId);
+    return {
+      title: p.title || '',
+      body_html: p.body_html || '',
+      product_type: p.product_type || '',
+      tags: p.tags ? p.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      metafields,
+    };
+  },
+
+  // Push ONLY the given fields/tags/metafields to a product (field-level PUT).
+  // Untouched fields are never sent, so Shopify-side values we didn't change
+  // are left intact.
+  async updateProductContent(store, shopifyProductId, { fields = {}, tags = null, metafields = {} }) {
+    const client = this.getClient(store);
+    const numId = String(shopifyProductId).replace(/\D/g, '');
+    const product = { id: Number(numId) };
+    if ('title' in fields) product.title = fields.title;
+    if ('body_html' in fields) product.body_html = fields.body_html;
+    if ('product_type' in fields) product.product_type = fields.product_type;
+    if (tags != null) product.tags = Array.isArray(tags) ? tags.join(', ') : String(tags);
+    const metaKeys = Object.keys(metafields || {});
+    if (metaKeys.length) {
+      await this.loadMetafieldTypes(store);
+      product.metafields = this.transformMetafields(metafields);
+    }
+    const result = await client.request(`/products/${numId}.json`, {
+      method: 'PUT',
+      body: JSON.stringify({ product }),
+    });
+    return result.product;
+  },
+
   // Fetch a product's metafield VALUES from Shopify as a PIM JSONB map
   // ({ "namespace.key": value }). JSON/list-typed values are parsed to objects.
   async getProductMetafields(store, shopifyProductId) {
