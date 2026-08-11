@@ -4823,6 +4823,108 @@ app.post('/api/shopify/stores/:storeId/pull-collections', async (req, res) => {
   }
 });
 
+// Sync a single product's variants + images from Shopify into the PIM.
+// Shopify-owned fields (price, inventory, options, barcode, image set) are
+// refreshed; PIM-owned `cost` is preserved. Variants/images removed in Shopify
+// are removed from the PIM (Shopify is the source of truth for existing products).
+async function syncProductVariantsImages(store, productId, shopifyProductId) {
+  const client = shopifySync.getClient(store);
+  const numId = String(shopifyProductId).replace(/\D/g, '');
+  const data = await client.request(`/products/${numId}.json`);
+  const sp = data.product;
+  if (!sp) return { variants: 0, images: 0 };
+  const options = sp.options || [];
+
+  // --- Variants (match by SKU, preserve cost) ---
+  const { data: pimVariants } = await supabase
+    .from('variants').select('id, sku, cost').eq('product_id', productId);
+  const pimBySku = new Map((pimVariants || []).map(v => [(v.sku || '').trim(), v]));
+  const shopSkus = new Set();
+  let vCount = 0;
+  for (const [i, v] of (sp.variants || []).entries()) {
+    const sku = (v.sku || '').trim();
+    shopSkus.add(sku);
+    const row = {
+      sku,
+      barcode: v.barcode || '',
+      price: v.price != null ? parseFloat(v.price) : null,
+      compare_at_price: v.compare_at_price ? parseFloat(v.compare_at_price) : null,
+      inventory_quantity: v.inventory_quantity ?? 0,
+      weight: v.grams != null ? v.grams / 1000 : null,
+      option1_name: options[0]?.name || null, option1_value: v.option1 || null,
+      option2_name: options[1]?.name || null, option2_value: v.option2 || null,
+      option3_name: options[2]?.name || null, option3_value: v.option3 || null,
+      shopify_variant_id: v.id,
+      shopify_inventory_item_id: v.inventory_item_id,
+      position: i + 1,
+    };
+    const existing = pimBySku.get(sku);
+    if (existing) await supabase.from('variants').update(row).eq('id', existing.id);
+    else await supabase.from('variants').insert({ product_id: productId, cost: null, ...row });
+    vCount++;
+  }
+  for (const [sku, v] of pimBySku) {
+    if (sku && !shopSkus.has(sku)) await supabase.from('variants').delete().eq('id', v.id);
+  }
+
+  // --- Images (match by shopify_image_id) ---
+  const { data: pimImages } = await supabase
+    .from('images').select('id, shopify_image_id').eq('product_id', productId);
+  const pimByShopId = new Map((pimImages || []).map(im => [String(im.shopify_image_id), im]));
+  const shopImgIds = new Set((sp.images || []).map(im => String(im.id)));
+  let iCount = 0;
+  for (const [i, im] of (sp.images || []).entries()) {
+    const row = { url: im.src, alt_text: im.alt || sp.title, position: i + 1, source: 'shopify', shopify_image_id: String(im.id) };
+    const existing = pimByShopId.get(String(im.id));
+    if (existing) await supabase.from('images').update(row).eq('id', existing.id);
+    else await supabase.from('images').insert({ product_id: productId, ...row });
+    iCount++;
+  }
+  for (const im of (pimImages || [])) {
+    if (im.shopify_image_id && !shopImgIds.has(String(im.shopify_image_id))) {
+      await supabase.from('images').delete().eq('id', im.id);
+    }
+  }
+
+  return { variants: vCount, images: iCount };
+}
+
+// POST /api/db/products/:id/refresh-from-shopify — pull the latest content +
+// variants + images for ONE product from Shopify (on-demand, e.g. when opening
+// the product). Non-destructive to Shopify.
+app.post('/api/db/products/:id/refresh-from-shopify', async (req, res) => {
+  try {
+    const productId = req.params.id;
+    const product = await db.getProductById(productId);
+    if (!product) return res.status(404).json({ error: 'Produkt hittades inte' });
+    const storeId = getStoreId(req) || product.store_id;
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+
+    const { data: link } = await supabase
+      .from('store_products')
+      .select('id, shopify_product_id, shopify_baseline')
+      .eq('store_id', storeId).eq('product_id', productId).maybeSingle();
+    if (!link?.shopify_product_id) return res.status(400).json({ error: 'Produkten är inte kopplad till Shopify' });
+
+    // Content (safe pull — never writes to Shopify) + variants/images.
+    const content = await safePushProduct(store, product, link, { pull: true });
+    const struct = await syncProductVariantsImages(store, productId, link.shopify_product_id);
+    const fresh = await db.getProductById(productId);
+
+    res.json({
+      variants: struct.variants,
+      images: struct.images,
+      contentPulled: content.pulled,
+      conflicts: content.unresolved.length,
+      product: fresh,
+    });
+  } catch (error) {
+    console.error('refresh-from-shopify error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Continuous Shopify -> PIM pull (poll). Enable with SHOPIFY_PULL_MINUTES=<n>.
 // Pull-only: never writes to Shopify. On serverless (Vercel), setInterval does
 // not persist — use a Vercel Cron hitting /pull-all instead.
