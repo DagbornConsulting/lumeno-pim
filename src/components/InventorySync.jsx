@@ -22,6 +22,7 @@ export default function InventorySync() {
   const [aiLoading, setAiLoading] = useState(false);
   const [bulkType, setBulkType] = useState('');
   const [bulkTags, setBulkTags] = useState('');
+  const [roundTo9, setRoundTo9] = useState(true); // avrunda priser uppåt så de slutar på 9
 
   useEffect(() => {
     fetch(`${API_URL}/db/stores`)
@@ -33,6 +34,15 @@ export default function InventorySync() {
       })
       .catch(() => {});
   }, []);
+
+  // Round a price UP to the nearest whole number ending in 9 (358 -> 359, 360 -> 369).
+  const roundUpTo9 = (p) => {
+    if (p == null || p === '' || isNaN(Number(p))) return p;
+    return Math.ceil((Number(p) - 9) / 10) * 10 + 9;
+  };
+  // The price to show for a row given the current rounding mode (based on the
+  // original suggested price = cost × margin, so toggling is reversible).
+  const priceFor = (suggested, round) => (round ? roundUpTo9(suggested) : suggested);
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -83,7 +93,7 @@ export default function InventorySync() {
       // Seed the editable "create new" rows (tags kept as a comma string for editing).
       const nrows = (data.newProducts || []).map(p => ({
         ...p,
-        price: p.suggestedPrice,
+        price: priceFor(p.suggestedPrice, roundTo9),
         tags: Array.isArray(p.tags) ? p.tags.join(', ') : (p.tags || ''),
       }));
       setNewRows(nrows);
@@ -461,11 +471,24 @@ export default function InventorySync() {
               ) : (
                 <>
                   <div className="settings-description" style={{ marginBottom: 12 }}>
-                    {newRows.length} produkter i CSV:n saknas i Shopify. Justera pris, typ, taggar och bildlänk och skapa dem som utkast. Pris = inköp × {newRows[0]?.margin ?? 2.0} som standard.
+                    {newRows.length} produkter i CSV:n saknas i Shopify. Justera pris, typ, taggar och bildlänk och skapa dem som utkast. Pris = inköp × {newRows[0]?.margin ?? 2.0}{roundTo9 ? ', avrundat uppåt till 9' : ''} som standard.
                   </div>
 
                   {/* Bulk toolbar */}
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', paddingBottom: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={roundTo9}
+                        onChange={e => {
+                          const on = e.target.checked;
+                          setRoundTo9(on);
+                          // Recompute every row's price from its original suggested price.
+                          setNewRows(rows => rows.map(r => ({ ...r, price: priceFor(r.suggestedPrice, on) })));
+                        }}
+                      />
+                      Avrunda priser uppåt till 9
+                    </label>
                     <div className="form-group" style={{ marginBottom: 0 }}>
                       <label className="form-label">Sätt typ på valda</label>
                       <input className="form-input" value={bulkType} onChange={e => setBulkType(e.target.value)} placeholder="t.ex. Urna" style={{ width: 150 }} />
