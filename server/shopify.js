@@ -1105,6 +1105,73 @@ export const shopifySync = {
   // Bulk-fetch managed content + metafields for the whole catalog via GraphQL
   // (fast — ~1 call per 100 products). Returns Map<numericShopifyId, content>,
   // content in the sync-engine shape. Used to backfill baselines for the catalog.
+  // Bulk-fetch all Shopify collections with content + metafields via GraphQL.
+  // Returns an array of PIM-shaped collection rows.
+  async fetchAllCollectionsContent(store) {
+    const client = this.getClient(store);
+    const out = [];
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const SORT_MAP = {
+      BEST_SELLING: 'best-selling', ALPHA_ASC: 'alpha-asc', ALPHA_DESC: 'alpha-desc',
+      PRICE_ASC: 'price-asc', PRICE_DESC: 'price-desc', CREATED: 'created',
+      CREATED_DESC: 'created-desc', MANUAL: 'manual',
+    };
+    let cursor = null;
+    while (true) {
+      let d;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          d = await client.graphql(
+            `query($c: String) {
+              collections(first: 100, after: $c) {
+                nodes {
+                  id title handle descriptionHtml sortOrder
+                  seo { title description }
+                  ruleSet { appliedDisjunctively rules { column relation condition } }
+                  metafields(first: 50) { nodes { namespace key value type } }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }`,
+            { c: cursor }
+          );
+          break;
+        } catch (e) {
+          if (attempt < 5 && /THROTTLED|throttl/i.test(String(e.message))) { await sleep(2000); continue; }
+          throw e;
+        }
+      }
+      for (const c of d.collections.nodes) {
+        const metafields = {};
+        for (const m of (c.metafields?.nodes || [])) {
+          // global.title_tag / description_tag are surfaced as the seo columns.
+          if (m.namespace === 'global' && (m.key === 'title_tag' || m.key === 'description_tag')) continue;
+          const full = `${m.namespace}.${m.key}`;
+          let v = m.value;
+          if (m.type && (m.type === 'json' || m.type.startsWith('list.'))) { try { v = JSON.parse(m.value); } catch { /* keep raw */ } }
+          metafields[full] = v;
+        }
+        const isSmart = !!(c.ruleSet && c.ruleSet.rules && c.ruleSet.rules.length);
+        out.push({
+          shopify_collection_id: Number(c.id.split('/').pop()),
+          title: c.title || '',
+          handle: c.handle || '',
+          description: c.descriptionHtml || '',
+          seo_title: (c.seo?.title || '').slice(0, 70) || null,
+          seo_description: (c.seo?.description || '').slice(0, 160) || null,
+          collection_type: isSmart ? 'smart' : 'manual',
+          sort_order: SORT_MAP[c.sortOrder] || 'best-selling',
+          rules: isSmart ? c.ruleSet.rules.map(r => ({ column: r.column, relation: r.relation, condition: r.condition })) : [],
+          disjunctive: c.ruleSet?.appliedDisjunctively || false,
+          metafields,
+        });
+      }
+      if (!d.collections.pageInfo.hasNextPage) break;
+      cursor = d.collections.pageInfo.endCursor;
+    }
+    return out;
+  },
+
   async fetchAllProductsContent(store) {
     const client = this.getClient(store);
     const byId = new Map();

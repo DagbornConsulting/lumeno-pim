@@ -4767,6 +4767,62 @@ app.post('/api/shopify/stores/:storeId/pull-all', async (req, res) => {
   }
 });
 
+// Pull all Shopify collections (content + metafields) into the PIM. Upserts by
+// handle so collections missing from the PIM are created and the rest refreshed.
+async function pullCollectionsFromShopify(store) {
+  const cols = await shopifySync.fetchAllCollectionsContent(store);
+
+  const existing = [];
+  for (let from = 0; ; from += 1000) {
+    const { data } = await supabase.from('collections').select('handle').eq('store_id', store.id).range(from, from + 999);
+    existing.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const existingHandles = new Set(existing.map(c => c.handle));
+
+  let created = 0, updated = 0, failed = 0;
+  const errors = [];
+  for (const col of cols) {
+    try {
+      const { error } = await supabase.from('collections').upsert({
+        store_id: store.id,
+        title: col.title,
+        handle: col.handle,
+        description: col.description,
+        seo_title: col.seo_title,
+        seo_description: col.seo_description,
+        collection_type: col.collection_type,
+        sort_order: col.sort_order,
+        rules: col.rules,
+        disjunctive: col.disjunctive,
+        metafields: col.metafields,
+        shopify_collection_id: col.shopify_collection_id,
+        shopify_collection_gid: `gid://shopify/Collection/${col.shopify_collection_id}`,
+        sync_status: 'synced',
+      }, { onConflict: 'store_id,handle' });
+      if (error) throw error;
+      if (existingHandles.has(col.handle)) updated++; else created++;
+    } catch (e) {
+      failed++;
+      errors.push({ handle: col.handle, error: e.message });
+    }
+  }
+  return { shopifyCollections: cols.length, created, updated, failed, errors: errors.slice(0, 20) };
+}
+
+// POST /api/shopify/stores/:storeId/pull-collections
+app.post('/api/shopify/stores/:storeId/pull-collections', async (req, res) => {
+  try {
+    const store = await db.getStoreById(req.params.storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+    const result = await pullCollectionsFromShopify(store);
+    res.json(result);
+  } catch (error) {
+    console.error('pull-collections error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Continuous Shopify -> PIM pull (poll). Enable with SHOPIFY_PULL_MINUTES=<n>.
 // Pull-only: never writes to Shopify. On serverless (Vercel), setInterval does
 // not persist — use a Vercel Cron hitting /pull-all instead.
@@ -4784,6 +4840,10 @@ if (PULL_MINUTES > 0 && isDbConfigured()) {
           const r = await pullAllFromShopify(store);
           console.log(`🔄 Pull ${store.name}: pulled ${r.pulled}, conflicts ${r.conflicts}, pending ${r.pimPending}, unchanged ${r.unchanged}`);
         } catch (e) { console.error(`Pull failed for ${store.name}:`, e.message); }
+        try {
+          const c = await pullCollectionsFromShopify(store);
+          console.log(`🔄 Pull collections ${store.name}: created ${c.created}, updated ${c.updated}, failed ${c.failed}`);
+        } catch (e) { console.error(`Collection pull failed for ${store.name}:`, e.message); }
       }
     } catch (e) {
       console.error('Poll error:', e.message);
