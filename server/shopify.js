@@ -302,9 +302,11 @@ export const shopifySync = {
     const existingProduct = await this.findExistingProduct(store, product);
 
     if (existingProduct) {
-      console.log(`Found existing product (matched by ${existingProduct.matchedBy}: "${existingProduct.matchedValue}"), updating instead of creating`);
+      console.log(`Found existing product (matched by ${existingProduct.matchedBy}: "${existingProduct.matchedValue}") — LINKING only, NOT overwriting Shopify`);
 
-      // Update store_products with the found Shopify ID first
+      // Link the PIM product to the found Shopify product. We deliberately do
+      // NOT push/overwrite here: existing Shopify products are the source of
+      // truth and must only ever be updated via the field-level safe push.
       await supabase
         .from('store_products')
         .update({
@@ -314,8 +316,7 @@ export const shopifySync = {
         .eq('store_id', store.id)
         .eq('product_id', product.id);
 
-      // Now update the existing product instead of creating
-      return await this.updateProduct(store, product, existingProduct.shopifyProductId);
+      return { linkedExisting: true, id: existingProduct.shopifyProductId, gid: existingProduct.shopifyProductGid };
     }
 
     const shopifyProduct = this.transformProductToShopify(product);
@@ -823,8 +824,10 @@ export const shopifySync = {
           .eq('id', sp.id);
 
         if (sp.shopify_product_id) {
-          // Update existing
-          await this.updateProduct(store, sp.products, sp.shopify_product_id);
+          // SAFETY: never full-overwrite an existing Shopify product from here.
+          // Updates to existing products go through the app's field-level safe
+          // push. This bulk path only creates products that don't exist yet.
+          console.warn(`syncPendingProducts: skipping full-overwrite for product ${sp.product_id} — use safe push.`);
         } else {
           // Create new
           await this.createProduct(store, sp.products);
@@ -1351,20 +1354,24 @@ export class SyncWorker {
         case 'create':
           await shopifySync.createProduct(store, product);
           break;
-        case 'update':
+        case 'update': {
           const storeProduct = await supabase
             .from('store_products')
             .select('shopify_product_id')
             .eq('store_id', store.id)
             .eq('product_id', product.id)
             .single();
-          
+
           if (storeProduct.data?.shopify_product_id) {
-            await shopifySync.updateProduct(store, product, storeProduct.data.shopify_product_id);
+            // SAFETY: existing Shopify products are never full-overwritten by the
+            // background worker. Updates to existing products must go through the
+            // app's field-level safe push (/products/:id/push-safe). Skip here.
+            console.warn(`Worker: skipping full-overwrite update for product ${product.id} — use safe push.`);
           } else {
             await shopifySync.createProduct(store, product);
           }
           break;
+        }
         case 'delete':
           // Handle delete
           break;

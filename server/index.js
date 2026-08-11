@@ -3244,17 +3244,32 @@ app.post('/api/db/products/:id/publish', async (req, res) => {
           });
         }
 
-        // Check if product already exists in Shopify (in store_products table)
-        const storeProduct = result.find(sp => sp.store_id === storeId);
+        // Look up the Shopify link fresh (id + baseline needed for safe push).
+        const { data: link } = await supabase
+          .from('store_products')
+          .select('id, shopify_product_id, shopify_baseline')
+          .eq('store_id', storeId).eq('product_id', productId).maybeSingle();
 
-        if (storeProduct?.shopify_product_id) {
-          // Update existing
-          await shopifySync.updateProduct(store, product, storeProduct.shopify_product_id);
-          syncResults.push({ storeId, success: true, action: 'updated' });
+        if (link?.shopify_product_id) {
+          // EXISTING product → safe, field-level push. Never full-overwrites
+          // Shopify; Shopify-side changes are pulled in and conflicts flagged.
+          const r = await safePushProduct(store, product, link);
+          syncResults.push({ storeId, success: true, action: 'safe-push', pushedFields: r.pushedFields + r.pushedMetafields, pulled: r.pulled, conflicts: r.unresolved.length });
         } else {
-          // Create new (createProduct now includes duplicate check against Shopify)
-          await shopifySync.createProduct(store, product);
-          syncResults.push({ storeId, success: true, action: 'created' });
+          // NEW product → create in Shopify (createProduct only creates or links,
+          // it never overwrites an existing product), then capture the baseline.
+          const created = await shopifySync.createProduct(store, product);
+          const newShopifyId = created?.id || created?.product?.id || null;
+          if (newShopifyId) {
+            const { data: up } = await supabase.from('store_products').upsert({
+              product_id: productId, store_id: storeId,
+              shopify_product_id: newShopifyId,
+              shopify_product_gid: `gid://shopify/Product/${newShopifyId}`,
+              is_published: true, last_synced_at: new Date().toISOString(),
+            }, { onConflict: 'store_id,product_id' }).select('id').single();
+            if (up?.id) { try { await captureProductBaseline(store, up.id, newShopifyId); } catch (_) {} }
+          }
+          syncResults.push({ storeId, success: true, action: created?.linkedExisting ? 'linked' : 'created' });
         }
       } catch (syncError) {
         console.error(`Sync error for store ${storeId}:`, syncError);
@@ -3361,7 +3376,7 @@ app.post('/api/db/stores/:storeId/retry-failed', async (req, res) => {
     // Get all failed products for this store
     const { data: failedProducts } = await supabase
       .from('store_products')
-      .select('product_id, shopify_product_id')
+      .select('id, product_id, shopify_product_id, shopify_baseline')
       .eq('store_id', storeId)
       .eq('sync_status', 'error');
 
@@ -3381,9 +3396,19 @@ app.post('/api/db/stores/:storeId/retry-failed', async (req, res) => {
         }
 
         if (sp.shopify_product_id) {
-          await shopifySync.updateProduct(store, product, sp.shopify_product_id);
+          // EXISTING → safe field-level push (never full-overwrites Shopify).
+          await safePushProduct(store, product, sp);
         } else {
-          await shopifySync.createProduct(store, product);
+          const c = await shopifySync.createProduct(store, product);
+          const nid = c?.id || c?.product?.id || null;
+          if (nid) {
+            const { data: up } = await supabase.from('store_products').upsert({
+              product_id: sp.product_id, store_id: storeId,
+              shopify_product_id: nid, shopify_product_gid: `gid://shopify/Product/${nid}`,
+              is_published: true, last_synced_at: new Date().toISOString(),
+            }, { onConflict: 'store_id,product_id' }).select('id').single();
+            if (up?.id) { try { await captureProductBaseline(store, up.id, nid); } catch (_) {} }
+          }
         }
         results.success++;
       } catch (syncError) {
@@ -4139,16 +4164,55 @@ app.post('/api/db/suppliers', async (req, res) => {
 
 // --- SYNC ---
 
-// Trigger sync for store
+// Trigger sync for store — SAFE bulk push of pending products.
+// Each product goes through the field-level safe push (never full-overwrites
+// Shopify); products not yet in Shopify are created.
 app.post('/api/db/stores/:id/sync', async (req, res) => {
   try {
-    const store = await db.getStoreById(req.params.id);
-    if (!store) {
-      return res.status(404).json({ error: 'Store not found' });
+    const storeId = req.params.id;
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+
+    const pending = [];
+    for (let from = 0; ; from += 1000) {
+      const { data } = await supabase
+        .from('store_products')
+        .select('id, product_id, shopify_product_id, shopify_baseline')
+        .eq('store_id', storeId).eq('sync_status', 'pending')
+        .range(from, from + 999);
+      pending.push(...(data || []));
+      if (!data || data.length < 1000) break;
     }
-    
-    const results = await shopifySync.syncPendingProducts(store);
-    res.json({ results });
+
+    let pushed = 0, created = 0, conflicts = 0, failed = 0;
+    const errors = [];
+    for (const link of pending) {
+      try {
+        const product = await db.getProductById(link.product_id);
+        if (!product) continue;
+        if (link.shopify_product_id) {
+          const r = await safePushProduct(store, product, link);
+          pushed++;
+          if (r.unresolved.length) conflicts++;
+        } else {
+          const c = await shopifySync.createProduct(store, product);
+          const nid = c?.id || c?.product?.id || null;
+          if (nid) {
+            const { data: up } = await supabase.from('store_products').upsert({
+              product_id: link.product_id, store_id: storeId,
+              shopify_product_id: nid, shopify_product_gid: `gid://shopify/Product/${nid}`,
+              is_published: true, last_synced_at: new Date().toISOString(),
+            }, { onConflict: 'store_id,product_id' }).select('id').single();
+            if (up?.id) { try { await captureProductBaseline(store, up.id, nid); } catch (_) {} }
+          }
+          created++;
+        }
+      } catch (e) {
+        failed++;
+        errors.push({ product_id: link.product_id, error: e.message });
+      }
+    }
+    res.json({ pushed, created, conflicts, failed, errors: errors.slice(0, 20) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -4521,6 +4585,88 @@ const pimContentOf = (product) => ({
   metafields: product.metafields || {},
 });
 
+// Capture the current Shopify content as the sync baseline for a linked product.
+const captureProductBaseline = async (store, storeProductRowId, shopifyProductId) => {
+  const fresh = await shopifySync.fetchProductContent(store, shopifyProductId);
+  await supabase.from('store_products').update({
+    shopify_baseline: fresh,
+    baseline_synced_at: new Date().toISOString(),
+    sync_status: 'synced',
+    conflict_fields: null,
+  }).eq('id', storeProductRowId);
+  return fresh;
+};
+
+// Safely push ONE product to Shopify — field-level and conflict-aware.
+// It NEVER full-overwrites: only PIM-changed fields go up, Shopify-changed
+// fields are pulled into the PIM, and true conflicts are left untouched unless
+// an explicit resolution is given. Requires the product to already be linked to
+// a Shopify product (`link` has shopify_product_id + shopify_baseline).
+// This is the ONLY sanctioned path for updating existing Shopify products.
+async function safePushProduct(store, product, link, { resolutions = {}, dryRun = false } = {}) {
+  const shop = await shopifySync.fetchProductContent(store, link.shopify_product_id);
+  const diff = computeProductDiff({ pim: pimContentOf(product), shop, baseline: link.shopify_baseline });
+  const plan = buildSyncPlan(diff, resolutions);
+
+  if (dryRun) return { dryRun: true, counts: diff.counts, plan, unresolved: plan.unresolved };
+
+  // 1) Push PIM-owned changes to Shopify (only the changed fields).
+  if (plan.hasShopifyWrite) {
+    await shopifySync.updateProductContent(store, link.shopify_product_id, {
+      fields: plan.toShopify.fields,
+      tags: plan.toShopify.tags,
+      metafields: plan.toShopify.metafields,
+    });
+  }
+
+  // 2) Pull Shopify-owned changes into the PIM.
+  const pimUpdate = {};
+  if ('title' in plan.toPim.fields) pimUpdate.title = plan.toPim.fields.title;
+  if ('body_html' in plan.toPim.fields) pimUpdate.description = plan.toPim.fields.body_html;
+  if ('product_type' in plan.toPim.fields) pimUpdate.product_type = plan.toPim.fields.product_type;
+  if (plan.toPim.tags != null) pimUpdate.tags = plan.toPim.tags;
+  if (Object.keys(plan.toPim.metafields).length) {
+    pimUpdate.metafields = { ...(product.metafields || {}), ...plan.toPim.metafields };
+  }
+  if (Object.keys(pimUpdate).length) {
+    await supabase.from('products').update(pimUpdate).eq('id', product.id);
+  }
+
+  // 3) Re-capture baseline from live Shopify, preserving the old baseline for any
+  // UNRESOLVED conflict so it keeps being flagged (never silently becomes a push).
+  const fresh = await shopifySync.fetchProductContent(store, link.shopify_product_id);
+  const newBaseline = { ...fresh, metafields: { ...fresh.metafields } };
+  const oldBase = link.shopify_baseline || {};
+  for (const u of plan.unresolved) {
+    if (u.key.startsWith('metafield:')) {
+      const mk = u.key.slice('metafield:'.length);
+      if (oldBase.metafields && mk in oldBase.metafields) newBaseline.metafields[mk] = oldBase.metafields[mk];
+      else delete newBaseline.metafields[mk];
+    } else if (u.key === 'tags') {
+      if ('tags' in oldBase) newBaseline.tags = oldBase.tags;
+    } else {
+      if (u.key in oldBase) newBaseline[u.key] = oldBase[u.key];
+      else delete newBaseline[u.key];
+    }
+  }
+
+  await supabase.from('store_products').update({
+    shopify_baseline: newBaseline,
+    baseline_synced_at: new Date().toISOString(),
+    conflict_fields: plan.unresolved.length ? plan.unresolved : null,
+    sync_status: plan.unresolved.length ? 'conflict' : 'synced',
+    last_synced_at: new Date().toISOString(),
+  }).eq('id', link.id);
+
+  return {
+    pushedFields: Object.keys(plan.toShopify.fields).length + (plan.toShopify.tags != null ? 1 : 0),
+    pushedMetafields: Object.keys(plan.toShopify.metafields).length,
+    pulled: Object.keys(pimUpdate).length,
+    unresolved: plan.unresolved,
+    status: plan.unresolved.length ? 'conflict' : 'synced',
+  };
+}
+
 // GET /api/shopify/stores/:storeId/products/:productId/sync-diff
 // Per-field comparison of PIM vs Shopify vs baseline. Read-only.
 app.get('/api/shopify/stores/:storeId/products/:productId/sync-diff', async (req, res) => {
@@ -4576,69 +4722,8 @@ app.post('/api/shopify/stores/:storeId/products/:productId/push-safe', async (re
       .eq('store_id', storeId).eq('product_id', productId).maybeSingle();
     if (!link?.shopify_product_id) return res.status(400).json({ error: 'Produkten är inte kopplad till Shopify' });
 
-    const shop = await shopifySync.fetchProductContent(store, link.shopify_product_id);
-    const diff = computeProductDiff({ pim: pimContentOf(product), shop, baseline: link.shopify_baseline });
-    const plan = buildSyncPlan(diff, resolutions);
-
-    if (dryRun) {
-      return res.json({ dryRun: true, counts: diff.counts, plan, unresolved: plan.unresolved });
-    }
-
-    // 1) Push PIM-owned changes to Shopify (only the changed fields).
-    if (plan.hasShopifyWrite) {
-      await shopifySync.updateProductContent(store, link.shopify_product_id, {
-        fields: plan.toShopify.fields,
-        tags: plan.toShopify.tags,
-        metafields: plan.toShopify.metafields,
-      });
-    }
-
-    // 2) Pull Shopify-owned changes into the PIM.
-    const pimUpdate = {};
-    if ('title' in plan.toPim.fields) pimUpdate.title = plan.toPim.fields.title;
-    if ('body_html' in plan.toPim.fields) pimUpdate.description = plan.toPim.fields.body_html;
-    if ('product_type' in plan.toPim.fields) pimUpdate.product_type = plan.toPim.fields.product_type;
-    if (plan.toPim.tags != null) pimUpdate.tags = plan.toPim.tags;
-    if (Object.keys(plan.toPim.metafields).length) {
-      pimUpdate.metafields = { ...(product.metafields || {}), ...plan.toPim.metafields };
-    }
-    if (Object.keys(pimUpdate).length) {
-      await supabase.from('products').update(pimUpdate).eq('id', productId);
-    }
-
-    // 3) Re-capture baseline from live Shopify, but preserve the old baseline for
-    // any UNRESOLVED conflict so it keeps being flagged (never silently becomes a push).
-    const fresh = await shopifySync.fetchProductContent(store, link.shopify_product_id);
-    const newBaseline = { ...fresh, metafields: { ...fresh.metafields } };
-    const oldBase = link.shopify_baseline || {};
-    for (const u of plan.unresolved) {
-      if (u.key.startsWith('metafield:')) {
-        const mk = u.key.slice('metafield:'.length);
-        if (oldBase.metafields && mk in oldBase.metafields) newBaseline.metafields[mk] = oldBase.metafields[mk];
-        else delete newBaseline.metafields[mk];
-      } else if (u.key === 'tags') {
-        if ('tags' in oldBase) newBaseline.tags = oldBase.tags;
-      } else {
-        if (u.key in oldBase) newBaseline[u.key] = oldBase[u.key];
-        else delete newBaseline[u.key];
-      }
-    }
-
-    await supabase.from('store_products').update({
-      shopify_baseline: newBaseline,
-      baseline_synced_at: new Date().toISOString(),
-      conflict_fields: plan.unresolved.length ? plan.unresolved : null,
-      sync_status: plan.unresolved.length ? 'conflict' : 'synced',
-      last_synced_at: new Date().toISOString(),
-    }).eq('id', link.id);
-
-    res.json({
-      pushedFields: Object.keys(plan.toShopify.fields).length + (plan.toShopify.tags != null ? 1 : 0),
-      pushedMetafields: Object.keys(plan.toShopify.metafields).length,
-      pulled: Object.keys(pimUpdate).length,
-      unresolved: plan.unresolved,
-      status: plan.unresolved.length ? 'conflict' : 'synced',
-    });
+    const result = await safePushProduct(store, product, link, { resolutions, dryRun });
+    res.json(result);
   } catch (error) {
     console.error('push-safe error:', error);
     res.status(500).json({ error: error.message });
