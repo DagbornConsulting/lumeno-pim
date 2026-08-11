@@ -943,7 +943,6 @@ export const shopifySync = {
                       node {
                         location {
                           id
-                          name
                         }
                         quantities(names: "available") {
                           quantity
@@ -966,7 +965,9 @@ export const shopifySync = {
       const v = edge.node;
       const levels = v.inventoryItem?.inventoryLevels?.edges?.map(le => ({
         locationId: le.node.location.id,
-        locationName: le.node.location.name,
+        // location.name needs the read_locations scope which the app lacks;
+        // label from the id suffix instead.
+        locationName: le.node.location?.id ? `Lager ${le.node.location.id.split('/').pop()}` : 'Lager',
         available: le.node.quantities?.[0]?.quantity ?? 0
       })) || [];
 
