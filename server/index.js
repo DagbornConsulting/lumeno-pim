@@ -4603,7 +4603,7 @@ const captureProductBaseline = async (store, storeProductRowId, shopifyProductId
 // an explicit resolution is given. Requires the product to already be linked to
 // a Shopify product (`link` has shopify_product_id + shopify_baseline).
 // This is the ONLY sanctioned path for updating existing Shopify products.
-async function safePushProduct(store, product, link, { resolutions = {}, dryRun = false } = {}) {
+async function safePushProduct(store, product, link, { resolutions = {}, dryRun = false, pull = false } = {}) {
   const shop = await shopifySync.fetchProductContent(store, link.shopify_product_id);
   const diff = computeProductDiff({ pim: pimContentOf(product), shop, baseline: link.shopify_baseline });
   const plan = buildSyncPlan(diff, resolutions);
@@ -4611,7 +4611,9 @@ async function safePushProduct(store, product, link, { resolutions = {}, dryRun 
   if (dryRun) return { dryRun: true, counts: diff.counts, plan, unresolved: plan.unresolved };
 
   // 1) Push PIM-owned changes to Shopify (only the changed fields).
-  if (plan.hasShopifyWrite) {
+  // In pull mode we never write to Shopify — PIM drafts stay pending for a
+  // later explicit safe push.
+  if (!pull && plan.hasShopifyWrite) {
     await shopifySync.updateProductContent(store, link.shopify_product_id, {
       fields: plan.toShopify.fields,
       tags: plan.toShopify.tags,
@@ -4659,12 +4661,138 @@ async function safePushProduct(store, product, link, { resolutions = {}, dryRun 
   }).eq('id', link.id);
 
   return {
-    pushedFields: Object.keys(plan.toShopify.fields).length + (plan.toShopify.tags != null ? 1 : 0),
-    pushedMetafields: Object.keys(plan.toShopify.metafields).length,
+    pushedFields: pull ? 0 : Object.keys(plan.toShopify.fields).length + (plan.toShopify.tags != null ? 1 : 0),
+    pushedMetafields: pull ? 0 : Object.keys(plan.toShopify.metafields).length,
     pulled: Object.keys(pimUpdate).length,
+    counts: diff.counts,
     unresolved: plan.unresolved,
     status: plan.unresolved.length ? 'conflict' : 'synced',
   };
+}
+
+// Pull ALL Shopify-side changes into the PIM in one efficient pass (bulk catalog
+// fetch + local diffs). Non-destructive to Shopify: only pulls changes IN, never
+// pushes. PIM drafts (pim_changed) stay pending; true conflicts are flagged.
+async function pullAllFromShopify(store) {
+  const catalog = await shopifySync.fetchAllProductsContent(store); // Map<numId, content>
+
+  // Bulk-load PIM products + links (paginated; Supabase caps at 1000/select).
+  const products = [];
+  for (let from = 0; ; from += 1000) {
+    const { data } = await supabase
+      .from('products')
+      .select('id, title, description, product_type, tags, metafields')
+      .eq('store_id', store.id).range(from, from + 999);
+    products.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const productById = new Map(products.map(p => [p.id, p]));
+
+  const links = [];
+  for (let from = 0; ; from += 1000) {
+    const { data } = await supabase
+      .from('store_products')
+      .select('id, product_id, shopify_product_id, shopify_baseline')
+      .eq('store_id', store.id).not('shopify_product_id', 'is', null)
+      .range(from, from + 999);
+    links.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+
+  let pulled = 0, conflicts = 0, pimPending = 0, unchanged = 0, notInShopify = 0;
+  for (const link of links) {
+    const shop = catalog.get(String(link.shopify_product_id));
+    if (!shop) { notInShopify++; continue; }
+    const product = productById.get(link.product_id);
+    if (!product) continue;
+
+    const diff = computeProductDiff({ pim: pimContentOf(product), shop, baseline: link.shopify_baseline });
+    if (!diff.hasChanges) { unchanged++; continue; }
+    const plan = buildSyncPlan(diff, {});
+
+    // Apply Shopify-owned changes into the PIM.
+    const pimUpdate = {};
+    if ('title' in plan.toPim.fields) pimUpdate.title = plan.toPim.fields.title;
+    if ('body_html' in plan.toPim.fields) pimUpdate.description = plan.toPim.fields.body_html;
+    if ('product_type' in plan.toPim.fields) pimUpdate.product_type = plan.toPim.fields.product_type;
+    if (plan.toPim.tags != null) pimUpdate.tags = plan.toPim.tags;
+    if (Object.keys(plan.toPim.metafields).length) {
+      pimUpdate.metafields = { ...(product.metafields || {}), ...plan.toPim.metafields };
+    }
+    if (Object.keys(pimUpdate).length) {
+      await supabase.from('products').update(pimUpdate).eq('id', product.id);
+      pulled++;
+    }
+
+    // Baseline = current Shopify content, preserving old baseline for unresolved
+    // conflicts so they keep being flagged (never silently become a push).
+    const newBaseline = { ...shop, metafields: { ...shop.metafields } };
+    const oldBase = link.shopify_baseline || {};
+    for (const u of plan.unresolved) {
+      if (u.key.startsWith('metafield:')) {
+        const mk = u.key.slice('metafield:'.length);
+        if (oldBase.metafields && mk in oldBase.metafields) newBaseline.metafields[mk] = oldBase.metafields[mk];
+        else delete newBaseline.metafields[mk];
+      } else if (u.key === 'tags') {
+        if ('tags' in oldBase) newBaseline.tags = oldBase.tags;
+      } else {
+        if (u.key in oldBase) newBaseline[u.key] = oldBase[u.key];
+        else delete newBaseline[u.key];
+      }
+    }
+    await supabase.from('store_products').update({
+      shopify_baseline: newBaseline,
+      baseline_synced_at: new Date().toISOString(),
+      conflict_fields: plan.unresolved.length ? plan.unresolved : null,
+      sync_status: plan.unresolved.length ? 'conflict' : (diff.counts.pim_changed ? 'pending' : 'synced'),
+    }).eq('id', link.id);
+
+    if (plan.unresolved.length) conflicts++;
+    if (diff.counts.pim_changed) pimPending++;
+  }
+
+  return { total: links.length, pulled, conflicts, pimPending, unchanged, notInShopify };
+}
+
+// POST /api/shopify/stores/:storeId/pull-all — run a full Shopify->PIM pull now.
+app.post('/api/shopify/stores/:storeId/pull-all', async (req, res) => {
+  try {
+    const store = await db.getStoreById(req.params.storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+    const result = await pullAllFromShopify(store);
+    res.json(result);
+  } catch (error) {
+    console.error('pull-all error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Continuous Shopify -> PIM pull (poll). Enable with SHOPIFY_PULL_MINUTES=<n>.
+// Pull-only: never writes to Shopify. On serverless (Vercel), setInterval does
+// not persist — use a Vercel Cron hitting /pull-all instead.
+const PULL_MINUTES = Number(process.env.SHOPIFY_PULL_MINUTES) || 0;
+if (PULL_MINUTES > 0 && isDbConfigured()) {
+  let polling = false;
+  const runPoll = async () => {
+    if (polling) return; // avoid overlapping runs
+    polling = true;
+    try {
+      const stores = await db.getStores();
+      for (const store of (stores || [])) {
+        if (!store.access_token) continue;
+        try {
+          const r = await pullAllFromShopify(store);
+          console.log(`🔄 Pull ${store.name}: pulled ${r.pulled}, conflicts ${r.conflicts}, pending ${r.pimPending}, unchanged ${r.unchanged}`);
+        } catch (e) { console.error(`Pull failed for ${store.name}:`, e.message); }
+      }
+    } catch (e) {
+      console.error('Poll error:', e.message);
+    } finally {
+      polling = false;
+    }
+  };
+  console.log(`🔄 Shopify→PIM pull-poll enabled: every ${PULL_MINUTES} min`);
+  setInterval(runPoll, PULL_MINUTES * 60 * 1000);
 }
 
 // GET /api/shopify/stores/:storeId/products/:productId/sync-diff
