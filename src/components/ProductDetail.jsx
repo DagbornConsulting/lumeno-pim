@@ -61,6 +61,34 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
   const [docText, setDocText] = useState('');
   const [docName, setDocName] = useState('');
   const [docStatus, setDocStatus] = useState('idle'); // idle | loading | done | error
+  const [refreshing, setRefreshing] = useState(false); // pulling latest from Shopify on open
+
+  // On open: pull the latest content + variants + images from Shopify so every
+  // field is fresh. Non-destructive (never writes to Shopify). Skips products
+  // not linked to Shopify (new products).
+  useEffect(() => {
+    const storeId = stores?.[0]?.id;
+    if (!storeId || !product?.id) return;
+    const token = localStorage.getItem('pim_token');
+    const headers = { 'Content-Type': 'application/json', 'x-store-id': storeId };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    setRefreshing(true);
+    fetch(`${API_URL}/db/products/${product.id}/refresh-from-shopify`, { method: 'POST', headers })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (data?.product) {
+          setEditedProduct(prev => ({
+            ...prev,
+            ...data.product,
+            handle: data.product.handle || prev.handle,
+            images: data.product.images || prev.images || [],
+          }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product?.id, stores]);
 
   // Load pricing context (category rules, suppliers, global settings) for live preview
   useEffect(() => {
@@ -522,6 +550,11 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
                 <span className={`status-pill ${editedProduct.status}`}>
                   {editedProduct.status === 'active' ? 'Aktiv' : 'Utkast'}
                 </span>
+                {refreshing && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-secondary, #888)' }}>
+                    <RefreshCw size={12} className="spin" /> Hämtar från Shopify…
+                  </span>
+                )}
               </div>
             </div>
           </div>
