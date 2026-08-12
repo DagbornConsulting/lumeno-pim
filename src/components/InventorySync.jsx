@@ -234,6 +234,8 @@ export default function InventorySync() {
       product_type: r.product_type,
       tags: r.tags ? r.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
       imageUrl: r.imageUrl,
+      size: r.size,
+      color: r.color,
     }));
     if (!targets.length) return;
     setLoading('create');

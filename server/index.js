@@ -2215,12 +2215,19 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     const costCol = headers.find(h => /grundpris|inköp|cost|pris/i.test(h));
     const weightCol = headers.find(h => /vikt|weight/i.test(h));
     const sizeCol = headers.find(h => /storlek|mått|size|dimension/i.test(h));
+    const dropshipCol = headers.find(h => /dropship|godkänd/i.test(h));
 
     // Parse a Swedish/European decimal ("179,00" or "179.00") to a number.
     const parseNum = (val) => {
       if (val == null) return null;
       const n = parseFloat(String(val).replace(/\s/g, '').replace(',', '.'));
       return isNaN(n) ? null : n;
+    };
+    // Color is the part after the last comma in the supplier name
+    // ("TREASURE Urna S, Brun" -> "Brun").
+    const parseColor = (name) => {
+      if (!name || !name.includes(',')) return '';
+      return name.slice(name.lastIndexOf(',') + 1).trim();
     };
 
     // Build SKU→newQty map + full row data from CSV
@@ -2231,13 +2238,17 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       if (!sku) continue;
       const qty = parseInt(row[resolvedQtyCol], 10);
       if (!isNaN(qty)) csvMap[sku] = qty;
+      const name = nameCol ? String(row[nameCol] || '').trim() : '';
       csvRows[sku] = {
         sku,
-        name: nameCol ? String(row[nameCol] || '').trim() : '',
+        name,
         barcode: eanCol ? String(row[eanCol] || '').trim() : '',
         cost: costCol ? parseNum(row[costCol]) : null,
         weight: weightCol ? parseNum(row[weightCol]) : null,
         size: sizeCol ? String(row[sizeCol] || '').trim() : '',
+        color: parseColor(name),
+        // Approved for dropship? If the column is absent, treat as approved.
+        dropshipOk: dropshipCol ? /^(ja|yes|true|1)$/i.test(String(row[dropshipCol] || '').trim()) : true,
         qty: isNaN(qty) ? null : qty,
       };
     }
@@ -2303,6 +2314,7 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     //  - newProducts:  don't exist anywhere → candidates to create from CSV data
     let alreadyInPim = [];
     let newProducts = [];
+    let skippedNonDropship = 0;
     if (notFound.length) {
       const { data: pimVariants } = await supabase
         .from('variants')
@@ -2318,6 +2330,8 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       for (const sku of notFound) {
         if (pimSkus.has(sku)) { alreadyInPim.push(sku); continue; }
         const row = csvRows[sku] || { sku };
+        // Only create products approved for dropshipping.
+        if (row.dropshipOk === false) { skippedNonDropship++; continue; }
         const cost = row.cost;
         const suggestedPrice = cost != null ? Math.round(cost * defaultMargin) : null;
         newProducts.push({
@@ -2329,6 +2343,7 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
           margin: defaultMargin,
           weight: row.weight,
           size: row.size || '',
+          color: row.color || '',
           qty: row.qty,
           product_type: '',
           tags: [],
@@ -2354,6 +2369,7 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       skippedUntracked: untracked.length,
       newCount: newProducts.length,
       alreadyInPimCount: alreadyInPim.length,
+      skippedNonDropship,
     });
   } catch (error) {
     console.error('Inventory preview error:', error);
@@ -2458,6 +2474,12 @@ app.post('/api/inventory/create-products', async (req, res) => {
           ? p.tags
           : (p.tags ? String(p.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
 
+        // Map deterministic CSV fields straight into Shopify metafields:
+        // dimensions -> custom.storlek, colour -> custom.fargnyans.
+        const metafields = {};
+        if (p.size && String(p.size).trim()) metafields['custom.storlek'] = String(p.size).trim();
+        if (p.color && String(p.color).trim()) metafields['custom.fargnyans'] = String(p.color).trim();
+
         const productData = sanitizeHtmlFields({
           title: String(p.title || sku),
           sku,
@@ -2468,6 +2490,7 @@ app.post('/api/inventory/create-products', async (req, res) => {
           default_price: price,
           margin_multiplier: marginOverride,
           weight: p.weight != null && p.weight !== '' ? Number(p.weight) : null,
+          metafields,
           status: 'draft',
           store_id: storeId,
           variants: [{
