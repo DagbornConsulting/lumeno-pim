@@ -2417,8 +2417,19 @@ app.post('/api/inventory/apply', async (req, res) => {
         try {
           await shopifySync.setInventoryQuantitiesBatch(store, batch, locationId);
           updated += batch.length;
-        } catch (err) {
-          errors.push({ count: batch.length, error: err.message });
+        } catch (batchErr) {
+          // A batched inventorySetQuantities is atomic — one bad item fails the
+          // whole call. Retry the batch item by item so one bad row doesn't kill
+          // the rest, and report exactly which items failed and why.
+          for (const item of batch) {
+            try {
+              await shopifySync.setInventoryQuantitiesBatch(store, [item], locationId);
+              updated++;
+            } catch (itemErr) {
+              errors.push({ inventoryItemId: item.inventoryItemId, quantity: item.quantity, error: itemErr.message });
+            }
+            await new Promise(r => setTimeout(r, 150));
+          }
         }
         // Gentle pacing between batches to stay within API limits.
         await new Promise(r => setTimeout(r, 500));
@@ -2427,8 +2438,8 @@ app.post('/api/inventory/apply', async (req, res) => {
 
     res.json({
       updated,
-      failed: errors.reduce((sum, e) => sum + e.count, 0),
-      errors,
+      failed: errors.length,
+      errors: errors.slice(0, 50),
     });
   } catch (error) {
     console.error('Inventory apply error:', error);
