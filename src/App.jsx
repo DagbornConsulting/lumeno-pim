@@ -1122,16 +1122,6 @@ function ProductsView({
   onGoToShopifyImport, onDelete,
 }) {
   const [showTagFilter, setShowTagFilter] = useState(false);
-  const [shopifyGap, setShopifyGap] = useState(null);
-
-  useEffect(() => {
-    const storeId = localStorage.getItem('pim_active_store_id');
-    if (!storeId) return;
-    fetch(`${API_URL}/shopify/stores/${storeId}/product-diff`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.newInShopify?.length > 0) setShopifyGap(data.newInShopify.length); })
-      .catch(() => {});
-  }, []);
   // Close filter dropdowns when clicking outside
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -1172,18 +1162,6 @@ function ProductsView({
         </div>
       </div>
       
-      {/* Shopify gap notification */}
-      {shopifyGap > 0 && (
-        <div className="shopify-gap-banner">
-          <Globe size={15} />
-          <span className="gap-count">{shopifyGap}</span>
-          <span>produkter finns i Shopify men saknas i PIM</span>
-          <button className="gap-link" onClick={onGoToShopifyImport}>
-            Hämta till PIM →
-          </button>
-        </div>
-      )}
-
       {/* Pending changes banner */}
       {(() => {
         const pendingCount = products.filter(p =>

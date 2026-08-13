@@ -4537,6 +4537,126 @@ app.get('/api/shopify/stores/:storeId/product-diff', async (req, res) => {
   }
 });
 
+// Import ONE Shopify product into the PIM (product + variants + images +
+// metafields), linking it and capturing the sync baseline. Returns the created
+// PIM product. Used by import-from-shopify and the auto-import of new products.
+async function importOneShopifyProduct(store, shopifyId) {
+  const client = shopifySync.getClient(store);
+  const data = await client.request(`/products/${String(shopifyId).replace(/\D/g, '')}.json`);
+  const sp = data.product;
+  if (!sp) return null;
+
+  const options = sp.options || [];
+  const variants = (sp.variants || []).map(v => ({
+    sku: v.sku || '',
+    barcode: v.barcode || '',
+    price: parseFloat(v.price) || null,
+    compare_at_price: v.compare_at_price ? parseFloat(v.compare_at_price) : null,
+    inventory_quantity: v.inventory_quantity ?? 0,
+    weight: v.grams != null ? v.grams / 1000 : null,
+    option1_name: options[0]?.name || null, option1_value: v.option1 || null,
+    option2_name: options[1]?.name || null, option2_value: v.option2 || null,
+    option3_name: options[2]?.name || null, option3_value: v.option3 || null,
+    shopify_variant_id: v.id,
+    shopify_inventory_item_id: v.inventory_item_id,
+  }));
+  const images = (sp.images || []).map((img, idx) => ({
+    url: img.src, alt_text: img.alt || sp.title, position: idx + 1,
+    source: 'shopify', shopify_image_id: String(img.id),
+  }));
+  let metafields = {};
+  try { metafields = await shopifySync.getProductMetafields(store, sp.id); } catch (_) {}
+
+  const pimProduct = {
+    store_id: store.id,
+    title: sp.title,
+    vendor: sp.vendor || '',
+    product_type: sp.product_type || '',
+    description: sp.body_html || '',
+    tags: sp.tags ? sp.tags.split(', ').filter(Boolean) : [],
+    status: sp.status === 'active' ? 'active' : 'draft',
+    metafields, variants, images,
+  };
+  const created_product = await db.createProduct(pimProduct);
+  await supabase.from('store_products').upsert({
+    product_id: created_product.id,
+    store_id: store.id,
+    shopify_product_id: sp.id,
+    shopify_product_gid: `gid://shopify/Product/${sp.id}`,
+    sync_status: 'synced',
+    is_published: sp.status === 'active',
+    last_synced_at: new Date().toISOString(),
+    shopify_baseline: {
+      title: sp.title || '', body_html: sp.body_html || '',
+      product_type: sp.product_type || '', tags: pimProduct.tags, metafields,
+    },
+    baseline_synced_at: new Date().toISOString(),
+  }, { onConflict: 'store_id,product_id' });
+  return created_product;
+}
+
+// Find and import Shopify products that are GENUINELY new to the PIM (none of
+// their variant SKUs exist in the PIM). Matches by SKU — not product id — so the
+// PIM's grouped multi-variant products aren't re-imported as duplicates.
+async function importNewProductsFromShopify(store) {
+  const client = shopifySync.getClient(store);
+
+  // PIM SKU set + already-linked Shopify ids.
+  const pimVariants = [];
+  for (let from = 0; ; from += 1000) {
+    const { data } = await supabase.from('products').select('variants(sku)').eq('store_id', store.id).range(from, from + 999);
+    pimVariants.push(...(data || []));
+    if (!data || data.length < 1000) break;
+  }
+  const pimSkus = new Set();
+  for (const p of pimVariants) for (const v of (p.variants || [])) if (v.sku) pimSkus.add(v.sku.trim());
+  const { data: links } = await supabase.from('store_products').select('shopify_product_id').eq('store_id', store.id).not('shopify_product_id', 'is', null);
+  const linked = new Set((links || []).map(l => String(l.shopify_product_id)));
+
+  // Scan the catalog for products whose every SKU is missing from the PIM.
+  const newIds = [];
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  let cursor = null;
+  while (true) {
+    let d;
+    for (let a = 0; ; a++) {
+      try { d = await client.graphql('query($c: String){ products(first: 100, after: $c){ nodes{ id variants(first: 20){ nodes{ sku } } } pageInfo{ hasNextPage endCursor } } }', { c: cursor }); break; }
+      catch (e) { if (a < 5 && /THROTTLED|throttl/i.test(String(e.message))) { await sleep(2000); continue; } throw e; }
+    }
+    for (const p of d.products.nodes) {
+      const numId = p.id.split('/').pop();
+      if (linked.has(String(numId))) continue;
+      const skus = p.variants.nodes.map(v => (v.sku || '').trim()).filter(Boolean);
+      if (skus.length && skus.every(s => !pimSkus.has(s))) newIds.push(numId);
+    }
+    if (!d.products.pageInfo.hasNextPage) break;
+    cursor = d.products.pageInfo.endCursor;
+  }
+
+  let imported = 0, failed = 0;
+  const errors = [];
+  for (const id of newIds) {
+    try { await importOneShopifyProduct(store, id); imported++; }
+    catch (e) { failed++; errors.push({ id, error: e.message }); }
+    await sleep(150);
+  }
+  return { candidates: newIds.length, imported, failed, errors: errors.slice(0, 20) };
+}
+
+// POST /api/shopify/stores/:storeId/import-new — import all genuinely-new
+// Shopify products into the PIM now (by SKU; no duplicates).
+app.post('/api/shopify/stores/:storeId/import-new', async (req, res) => {
+  try {
+    const store = await db.getStoreById(req.params.storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+    const result = await importNewProductsFromShopify(store);
+    res.json(result);
+  } catch (error) {
+    console.error('import-new error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // POST /api/shopify/stores/:storeId/import-from-shopify
 // Import selected Shopify products into PIM
 app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) => {
@@ -4568,82 +4688,8 @@ app.post('/api/shopify/stores/:storeId/import-from-shopify', async (req, res) =>
         errorDetails.push(`Shopify #${shopifyId}: redan importerad — hoppades över`);
         continue;
       }
-
       try {
-        const data = await client.request(`/products/${shopifyId}.json`);
-        const sp = data.product;
-        if (!sp) continue;
-
-        const options = sp.options || [];
-        const variants = (sp.variants || []).map(v => ({
-          sku: v.sku || '',
-          barcode: v.barcode || '',
-          price: parseFloat(v.price) || null,
-          compare_at_price: v.compare_at_price ? parseFloat(v.compare_at_price) : null,
-          inventory_quantity: v.inventory_quantity ?? 0,
-          weight: v.grams || null,
-          option1_name: options[0]?.name || null,
-          option1_value: v.option1 || null,
-          option2_name: options[1]?.name || null,
-          option2_value: v.option2 || null,
-          option3_name: options[2]?.name || null,
-          option3_value: v.option3 || null,
-          shopify_variant_id: v.id,
-          shopify_inventory_item_id: v.inventory_item_id,
-        }));
-
-        // Images: correct column names (alt_text, not alt)
-        const images = (sp.images || []).map((img, idx) => ({
-          url: img.src,
-          alt_text: img.alt || sp.title,
-          position: idx + 1,
-          source: 'shopify',
-          shopify_image_id: String(img.id),
-        }));
-
-        // Pull the product's metafield values from Shopify too.
-        let metafields = {};
-        try {
-          metafields = await shopifySync.getProductMetafields(store, sp.id);
-        } catch (e) {
-          console.warn(`metafield import for #${shopifyId}:`, e.message);
-        }
-
-        const pimProduct = {
-          store_id: storeId,
-          title: sp.title,
-          vendor: sp.vendor || '',
-          product_type: sp.product_type || '',
-          description: sp.body_html || '',
-          tags: sp.tags ? sp.tags.split(', ').filter(Boolean) : [],
-          status: sp.status === 'active' ? 'active' : 'draft',
-          metafields,
-          variants,
-          images,
-        };
-
-        const created_product = await db.createProduct(pimProduct);
-
-        // Link to store via store_products, capturing the imported content as
-        // the sync baseline (last-known Shopify state) for conflict detection.
-        await supabase.from('store_products').upsert({
-          product_id: created_product.id,
-          store_id: storeId,
-          shopify_product_id: sp.id,
-          shopify_product_gid: `gid://shopify/Product/${sp.id}`,
-          sync_status: 'synced',
-          is_published: sp.status === 'active',
-          last_synced_at: new Date().toISOString(),
-          shopify_baseline: {
-            title: sp.title || '',
-            body_html: sp.body_html || '',
-            product_type: sp.product_type || '',
-            tags: pimProduct.tags,
-            metafields,
-          },
-          baseline_synced_at: new Date().toISOString(),
-        }, { onConflict: 'store_id,product_id' });
-
+        await importOneShopifyProduct(store, shopifyId);
         created++;
       } catch (err) {
         errors++;
@@ -5094,6 +5140,10 @@ if (PULL_MINUTES > 0 && isDbConfigured()) {
           const c = await pullCollectionsFromShopify(store);
           console.log(`🔄 Pull collections ${store.name}: created ${c.created}, updated ${c.updated}, failed ${c.failed}`);
         } catch (e) { console.error(`Collection pull failed for ${store.name}:`, e.message); }
+        try {
+          const n = await importNewProductsFromShopify(store);
+          if (n.imported) console.log(`🔄 Auto-import ${store.name}: ${n.imported} new products imported`);
+        } catch (e) { console.error(`Auto-import failed for ${store.name}:`, e.message); }
       }
     } catch (e) {
       console.error('Poll error:', e.message);
