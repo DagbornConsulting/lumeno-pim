@@ -473,23 +473,32 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
       const data = await res.json();
 
       if (field === 'all' && typeof data.result === 'object') {
-        setEditedProduct(prev => ({
-          ...prev,
-          description: data.result.description || prev.description,
-          agentSummary: data.result.agentSummary || prev.agentSummary,
-          shortDescription: data.result.shortDescription || prev.shortDescription,
-          specifications: data.result.specifications || prev.specifications,
-          faq: data.result.faq || prev.faq,
-          useCases: data.result.useCases || prev.useCases,
-          seoTitle: data.result.seoTitle || prev.seoTitle,
-          seoDescription: data.result.seoDescription || prev.seoDescription,
-          searchTerms: data.result.searchTerms || prev.searchTerms,
-          tags: data.result.tags || prev.tags,
-          // Kort ingress lagras som metafält (inte egen kolumn)
-          metafields: data.result.intro
-            ? { ...prev.metafields, 'custom.kort_produktbeskrivning': data.result.intro }
-            : prev.metafields,
-        }));
+        const r = data.result;
+        setEditedProduct(prev => {
+          // Fill metafields from the AI result (only non-empty values).
+          const mf = { ...(prev.metafields || {}) };
+          if (r.intro) mf['custom.kort_produktbeskrivning'] = r.intro;
+          if (r.material) mf['custom.material'] = r.material;
+          if (r.care) mf['custom.tvattrad'] = r.care;
+          if (r.series) mf['custom.serie'] = r.series;
+          if (r.scent) mf['custom.doft'] = r.scent;
+          return {
+            ...prev,
+            description: r.description || prev.description,
+            agentSummary: r.agentSummary || prev.agentSummary,
+            shortDescription: r.shortDescription || prev.shortDescription,
+            specifications: r.specifications || prev.specifications,
+            faq: r.faq || prev.faq,
+            useCases: r.useCases || prev.useCases,
+            seoTitle: r.seoTitle || prev.seoTitle,
+            seoDescription: r.seoDescription || prev.seoDescription,
+            searchTerms: r.searchTerms || prev.searchTerms,
+            tags: r.tags || prev.tags,
+            product_type: r.productType || prev.product_type,
+            productCategory: r.category || prev.productCategory,
+            metafields: mf,
+          };
+        });
       } else if (field === 'specifications' || field === 'faq') {
         if (Array.isArray(data.result)) {
           setEditedProduct(prev => ({ ...prev, [field]: data.result }));

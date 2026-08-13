@@ -1361,7 +1361,13 @@ Svara ENBART med JSON (inga kommentarer, ingen markdown):
   "seoTitle": "Max 60 tecken SEO-titel",
   "seoDescription": "Max 155 tecken meta description",
   "searchTerms": "kommaseparerade söktermer och synonymer",
-  "tags": ["relevanta", "taggar"]
+  "tags": ["relevanta", "taggar"],
+  "productType": "generisk varukategori/produkttyp, t.ex. Urna, Bordslampa, Kuddfodral",
+  "material": "huvudmaterial, t.ex. Keramik, Mässing, Linne, Glas (tom om okänt)",
+  "care": "kort skötselråd, t.ex. torka av med fuktig trasa (tom om ej relevant)",
+  "series": "produktserie/kollektion om den framgår av namnet (t.ex. TREASURE, COTE NORD), annars tom",
+  "scent": "doft om det är ett doftljus e.d., annars tom",
+  "category": "Shopify-produktkategori som sökväg, t.ex. 'Hem & trädgård > Inredning > Vaser' (bästa gissning)"
 }`;
     } else if (field === 'agentSummary') {
       prompt = `Generera snabbfakta/agent summary för denna produkt. 6-8 punkter i köpordning (viktigast först). Löptext som AI-agenter kan parsa. En punkt per rad. ${productContext}
