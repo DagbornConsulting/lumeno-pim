@@ -54,6 +54,7 @@ export default function App() {
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterTags, setFilterTags] = useState([]);
   const [filterImage, setFilterImage] = useState('all'); // 'all' | 'with' | 'without'
+  const [filterPublished, setFilterPublished] = useState('all'); // 'all' | 'published' | 'unpublished' | 'error'
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [selectedProductForEdit, setSelectedProductForEdit] = useState(null);
   const [showBatchGenerate, setShowBatchGenerate] = useState(false);
@@ -137,7 +138,7 @@ export default function App() {
     if (loading) return;
 
     loadData(false, true); // append=false, isFilterChange=true
-  }, [filterBrand, filterType, filterStatus, filterTags, filterImage, searchQuery]);
+  }, [filterBrand, filterType, filterStatus, filterTags, filterImage, filterPublished, searchQuery]);
 
   const loadData = async (append = false, isFilterChange = false) => {
     if (append) {
@@ -176,6 +177,9 @@ export default function App() {
       }
       if (filterImage && filterImage !== 'all') {
         params.append('imageFilter', filterImage);
+      }
+      if (filterPublished && filterPublished !== 'all') {
+        params.append('storeFilter', filterPublished);
       }
       if (searchQuery) {
         params.append('search', searchQuery);
@@ -617,6 +621,28 @@ export default function App() {
     }
   };
 
+  const handleMergeProducts = async () => {
+    if (selectedProducts.length < 2) return;
+    if (!confirm(`Slå ihop ${selectedProducts.length} produkter till EN produkt med varianter? De valda produkterna blir varianter (storlek förifylls). Detta går inte att ångra.`)) return;
+    const headers = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('pim_token');
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    try {
+      const r = await fetch(`${API_URL}/db/products/merge`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ productIds: selectedProducts }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Kunde inte slå ihop');
+      setSelectedProducts([]);
+      await loadData();
+      // Open the merged product so the user can refine variants/enrich.
+      if (data.product) setSelectedProductForEdit(data.product);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const handleAddProduct = () => {
     const newProduct = {
       id: `new-${Date.now()}`,
@@ -945,6 +971,8 @@ export default function App() {
               setFilterTags={setFilterTags}
               filterImage={filterImage}
               setFilterImage={setFilterImage}
+              filterPublished={filterPublished}
+              setFilterPublished={setFilterPublished}
               brands={allBrands}
               types={allTypes}
               allTags={allTags}
@@ -954,6 +982,7 @@ export default function App() {
               onBatchGenerate={() => setShowBatchGenerate(true)}
               onExport={() => setShowExportModal(true)}
               onAddProduct={handleAddProduct}
+              onMerge={handleMergeProducts}
               hasMoreProducts={hasMoreProducts}
               loadingMore={loadingMore}
               filterLoading={filterLoading}
@@ -1085,8 +1114,9 @@ function ProductsView({
   filterBrand, setFilterBrand, filterType, setFilterType,
   filterStatus, setFilterStatus, filterTags, setFilterTags,
   filterImage, setFilterImage,
+  filterPublished, setFilterPublished,
   brands, types, allTags,
-  stats, onPublish, onEditProduct, onBatchGenerate, onExport, onAddProduct,
+  stats, onPublish, onEditProduct, onBatchGenerate, onExport, onAddProduct, onMerge,
   hasMoreProducts, loadingMore, filterLoading, onLoadMore, currentlyLoaded,
   sortBy, sortDirection, onSort,
   onGoToShopifyImport, onDelete,
@@ -1266,6 +1296,17 @@ function ProductsView({
           <option value="without">Saknar bilder</option>
         </select>
 
+        <select
+          className="filter-select"
+          value={filterPublished}
+          onChange={(e) => setFilterPublished(e.target.value)}
+        >
+          <option value="all">Alla i Shopify</option>
+          <option value="published">Publicerade</option>
+          <option value="unpublished">Ej publicerade</option>
+          <option value="error">Synk-fel</option>
+        </select>
+
         <div className="tag-filter-container" style={{ position: 'relative' }}>
           <button
             className={`filter-select ${filterTags.length > 0 ? 'active-filter' : ''}`}
@@ -1374,7 +1415,7 @@ function ProductsView({
           )}
         </div>
 
-        {(filterBrand !== 'all' || filterType !== 'all' || filterStatus !== 'all' || filterTags.length > 0) && (
+        {(filterBrand !== 'all' || filterType !== 'all' || filterStatus !== 'all' || filterTags.length > 0 || filterImage !== 'all' || filterPublished !== 'all') && (
           <button
             className="btn btn-ghost"
             onClick={() => {
@@ -1382,6 +1423,8 @@ function ProductsView({
               setFilterType('all');
               setFilterStatus('all');
               setFilterTags([]);
+              setFilterImage('all');
+              setFilterPublished('all');
             }}
             style={{ fontSize: '13px' }}
           >
@@ -1407,6 +1450,11 @@ function ProductsView({
         {selectedProducts.length > 0 && (
           <div className="selection-info">
             <span>{selectedProducts.length} valda</span>
+            {selectedProducts.length >= 2 && (
+              <button className="btn btn-secondary" onClick={onMerge} title="Slå ihop valda produkter till en produkt med varianter">
+                <Layers size={16} /> Slå ihop till varianter
+              </button>
+            )}
             <button className="btn btn-primary" onClick={onPublish}>
               <Globe size={16} /> Publicera till butiker
             </button>

@@ -2521,6 +2521,114 @@ app.post('/api/inventory/create-products', async (req, res) => {
   }
 });
 
+// POST /api/db/products/merge
+// Merge several PIM products into ONE product with variants (e.g. same item in
+// different sizes). Each source product becomes a variant; the size (from
+// custom.storlek) is pre-filled as the variant option. Only for draft products
+// not yet in Shopify. Body: { productIds: [...], title?, optionName? }
+app.post('/api/db/products/merge', async (req, res) => {
+  try {
+    const { productIds, title, optionName } = req.body || {};
+    if (!Array.isArray(productIds) || productIds.length < 2) {
+      return res.status(400).json({ error: 'Minst 2 produkter krävs för att slå ihop' });
+    }
+    const optName = (optionName || 'Storlek').trim();
+
+    // Load full products (with variants, metafields, images).
+    const products = [];
+    for (const id of productIds) {
+      const p = await db.getProductById(id);
+      if (p) products.push(p);
+    }
+    if (products.length < 2) return res.status(400).json({ error: 'Produkterna hittades inte' });
+
+    // Refuse if any is already linked to Shopify (merging live products is unsafe).
+    const { data: links } = await supabase
+      .from('store_products').select('product_id, shopify_product_id')
+      .in('product_id', productIds).not('shopify_product_id', 'is', null);
+    if (links && links.length) {
+      return res.status(400).json({ error: 'Kan inte slå ihop produkter som redan finns i Shopify. Slå bara ihop utkast.' });
+    }
+
+    const primary = products[0];
+    const storeId = primary.store_id;
+
+    // Suggested common title: primary title with a trailing size code stripped
+    // ("ROMANCE Vas M, Klar" -> "ROMANCE Vas, Klar").
+    const deriveTitle = (t) => {
+      const [base, color] = (String(t || '').split(/,(.*)/s).slice(0, 2));
+      const stripped = base.replace(/\s+(XXS|XS|S|M|L|XL|XXL|XXXL)\s*$/i, '').trim();
+      return color != null ? `${stripped},${color}` : stripped;
+    };
+    const finalTitle = (title && title.trim()) || deriveTitle(primary.title);
+
+    // Build merged variants: one per source product, size as the option value.
+    const mergedVariants = [];
+    for (const p of products) {
+      const v = (p.variants && p.variants[0]) || {};
+      const size = p.metafields?.['custom.storlek'] || v.option1_value || '';
+      mergedVariants.push({
+        sku: v.sku || p.sku || '',
+        barcode: v.barcode || p.barcode || null,
+        price: v.price ?? p.default_price ?? null,
+        compare_at_price: v.compare_at_price ?? null,
+        cost: v.cost ?? p.default_cost ?? null,
+        inventory_quantity: v.inventory_quantity ?? 0,
+        weight: v.weight ?? p.weight ?? null,
+        option1_name: optName,
+        option1_value: String(size) || p.title,
+      });
+    }
+
+    // Merged metafields: keep the primary's, but drop custom.storlek (now per-variant).
+    const mergedMetafields = { ...(primary.metafields || {}) };
+    delete mergedMetafields['custom.storlek'];
+
+    // Merged images: combine all, dedupe by url.
+    const seenUrls = new Set();
+    const mergedImages = [];
+    for (const p of products) {
+      for (const img of (p.images || [])) {
+        const url = img.url;
+        if (!url || seenUrls.has(url)) continue;
+        seenUrls.add(url);
+        mergedImages.push({ url, alt_text: img.alt_text || finalTitle, position: mergedImages.length + 1 });
+      }
+    }
+
+    // Update the primary product in place: title + metafields.
+    await supabase.from('products').update({
+      title: finalTitle,
+      metafields: mergedMetafields,
+      status: 'draft',
+    }).eq('id', primary.id);
+
+    // Replace the primary's variants with the merged set.
+    await supabase.from('variants').delete().eq('product_id', primary.id);
+    await supabase.from('variants').insert(
+      mergedVariants.map((v, i) => ({ ...v, product_id: primary.id, position: i + 1 }))
+    );
+
+    // Replace the primary's images with the combined set.
+    await supabase.from('images').delete().eq('product_id', primary.id);
+    if (mergedImages.length) {
+      await supabase.from('images').insert(mergedImages.map(im => ({ ...im, product_id: primary.id })));
+    }
+
+    // Delete the absorbed products (variants/images/links cascade).
+    const absorbed = products.slice(1).map(p => p.id);
+    if (absorbed.length) {
+      await supabase.from('products').delete().in('id', absorbed);
+    }
+
+    const merged = await db.getProductById(primary.id);
+    res.json({ mergedInto: primary.id, absorbed: absorbed.length, variants: mergedVariants.length, product: merged });
+  } catch (error) {
+    console.error('Merge products error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================
 // IMAGE PROCESSING
 // ============================================
