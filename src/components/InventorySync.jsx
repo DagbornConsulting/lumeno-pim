@@ -473,7 +473,16 @@ export default function InventorySync() {
               ) : (
                 <>
                   <div className="settings-description" style={{ marginBottom: 12 }}>
-                    {newRows.length} produkter i CSV:n saknas i Shopify. Justera pris, typ, taggar och bildlänk och skapa dem som utkast. Pris = inköp × {newRows[0]?.margin ?? 2.0}{roundTo9 ? ', avrundat uppåt till 9' : ''} som standard.
+                    {newRows.length} produkter i CSV:n saknas i Shopify och kan skapas. Justera pris, typ, taggar och bildlänk och skapa dem som utkast. Pris = inköp × {newRows[0]?.margin ?? 2.0}{roundTo9 ? ', avrundat uppåt till 9' : ''} som standard.
+                    {(diff.skippedNonDropship > 0 || diff.alreadyInPimCount > 0) && (
+                      <span style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #888)' }}>
+                        Automatiskt exkluderade ur listan:
+                        {diff.skippedNonDropship > 0 && ` ${diff.skippedNonDropship} ej godkända för dropship`}
+                        {diff.skippedNonDropship > 0 && diff.alreadyInPimCount > 0 && ' ·'}
+                        {diff.alreadyInPimCount > 0 && ` ${diff.alreadyInPimCount} finns redan i PIM`}
+                        .
+                      </span>
+                    )}
                   </div>
 
                   {/* Bulk toolbar */}
