@@ -5,7 +5,9 @@
     "buildCommand": "npm install"
   },
   "deploy": {
-    "startCommand": "node server/index.js",
+    "startCommand": "node --max-http-header-size=65536 server/index.js",
+    "healthcheckPath": "/api/ping",
+    "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
