@@ -1367,7 +1367,7 @@ Svara ENBART med JSON (inga kommentarer, ingen markdown):
   "care": "kort skötselråd, t.ex. torka av med fuktig trasa (tom om ej relevant)",
   "series": "produktserie/kollektion om den framgår av namnet (t.ex. TREASURE, COTE NORD), annars tom",
   "scent": "doft om det är ett doftljus e.d., annars tom",
-  "category": "Shopify-produktkategori som sökväg, t.ex. 'Hem & trädgård > Inredning > Vaser' (bästa gissning)"
+  "category": "Shopify standard product category as the ENGLISH taxonomy path, e.g. 'Home & Garden > Decor > Vases' or 'Home & Garden > Kitchen & Dining > Tableware > Coffee & Tea Cups' (best guess, English so it matches Shopify's taxonomy)"
 }`;
     } else if (field === 'agentSummary') {
       prompt = `Generera snabbfakta/agent summary för denna produkt. 6-8 punkter i köpordning (viktigast först). Löptext som AI-agenter kan parsa. En punkt per rad. ${productContext}
@@ -3482,6 +3482,9 @@ app.post('/api/db/products/:id/publish', async (req, res) => {
               is_published: true, last_synced_at: new Date().toISOString(),
             }, { onConflict: 'store_id,product_id' }).select('id').single();
             if (up?.id) { try { await captureProductBaseline(store, up.id, newShopifyId); } catch (_) {} }
+            if (product.product_category) {
+              try { await shopifySync.setProductCategory(store, newShopifyId, product.product_category); } catch (e) { console.warn('category push:', e.message); }
+            }
           }
           syncResults.push({ storeId, success: true, action: created?.linkedExisting ? 'linked' : 'created' });
         }
@@ -4879,6 +4882,13 @@ async function safePushProduct(store, product, link, { resolutions = {}, dryRun 
       tags: plan.toShopify.tags,
       metafields: plan.toShopify.metafields,
     });
+  }
+
+  // 1b) Push the Shopify product category if the PIM has one set (not part of the
+  // field-level content engine). Best-effort — a bad category doesn't fail the push.
+  if (!pull && product.product_category) {
+    try { await shopifySync.setProductCategory(store, link.shopify_product_id, product.product_category); }
+    catch (e) { console.warn('category push:', e.message); }
   }
 
   // 2) Pull Shopify-owned changes into the PIM.

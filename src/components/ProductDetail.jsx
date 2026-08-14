@@ -28,6 +28,28 @@ const COUNTRY_NAMES = {
 };
 const MAX_IMAGES = 8;
 
+// Match an AI-suggested category text (English path or leaf) to the best
+// Shopify taxonomy node id, so the picker pre-fills and it can be pushed.
+function matchCategoryId(text, categories) {
+  if (!text || !categories?.length) return '';
+  const t = String(text).toLowerCase().trim();
+  const leaf = t.split('>').pop().trim();
+  // 1) exact full-path match
+  let m = categories.find(c => c.p.toLowerCase() === t);
+  if (m) return m.id;
+  // 2) exact leaf-name match, deepest wins
+  const nameHits = categories.filter(c => c.n.toLowerCase() === leaf).sort((a, b) => (b.l || 0) - (a.l || 0));
+  if (nameHits.length) return nameHits[0].id;
+  // 3) path ends with the suggested path
+  m = categories.find(c => c.p.toLowerCase().endsWith(t));
+  if (m) return m.id;
+  // 4) fuzzy: name/path contains the leaf, deepest wins
+  const cands = categories
+    .filter(c => c.n.toLowerCase().includes(leaf) || c.p.toLowerCase().includes(leaf))
+    .sort((a, b) => (b.l || 0) - (a.l || 0));
+  return cands[0]?.id || '';
+}
+
 export default function ProductDetail({ product, stores, onSave, onDelete, onClose }) {
   const [editedProduct, setEditedProduct] = useState({
     ...product,
@@ -474,6 +496,14 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
 
       if (field === 'all' && typeof data.result === 'object') {
         const r = data.result;
+        // Map the AI's category text to a real Shopify taxonomy node id.
+        let matchedCat = '';
+        if (r.category) {
+          try {
+            const { shopifyCategories } = await import('../data/taxonomy.js');
+            matchedCat = matchCategoryId(r.category, shopifyCategories);
+          } catch (_) {}
+        }
         setEditedProduct(prev => {
           // Fill metafields from the AI result (only non-empty values).
           const mf = { ...(prev.metafields || {}) };
@@ -494,8 +524,8 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
             seoDescription: r.seoDescription || prev.seoDescription,
             searchTerms: r.searchTerms || prev.searchTerms,
             tags: r.tags || prev.tags,
-            product_type: r.productType || prev.product_type,
-            productCategory: r.category || prev.productCategory,
+            type: r.productType || prev.type,
+            productCategory: matchedCat || prev.productCategory,
             metafields: mf,
           };
         });

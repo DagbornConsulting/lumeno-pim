@@ -1227,6 +1227,29 @@ export const shopifySync = {
     return byId;
   },
 
+  // Set a product's Shopify standard product category (taxonomy node).
+  // categoryId is the short taxonomy id ("hg-3-67") or a full GID.
+  async setProductCategory(store, shopifyProductId, categoryId) {
+    if (!categoryId) return null;
+    const client = this.getClient(store);
+    const numId = String(shopifyProductId).replace(/\D/g, '');
+    const gid = String(categoryId).startsWith('gid://')
+      ? categoryId
+      : `gid://shopify/TaxonomyCategory/${categoryId}`;
+    const data = await client.graphql(
+      `mutation($id: ID!, $cat: ID!) {
+        productUpdate(product: { id: $id, category: $cat }) {
+          product { id category { id fullName } }
+          userErrors { field message }
+        }
+      }`,
+      { id: `gid://shopify/Product/${numId}`, cat: gid }
+    );
+    const errs = data.productUpdate?.userErrors || [];
+    if (errs.length) throw new Error(JSON.stringify(errs));
+    return data.productUpdate?.product?.category ?? null;
+  },
+
   // Push ONLY the given fields/tags/metafields to a product (field-level PUT).
   // Untouched fields are never sent, so Shopify-side values we didn't change
   // are left intact.
