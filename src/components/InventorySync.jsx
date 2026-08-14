@@ -236,6 +236,7 @@ export default function InventorySync() {
       imageUrl: r.imageUrl,
       size: r.size,
       color: r.color,
+      metafields: r.metafields || {},
     }));
     if (!targets.length) return;
     setLoading('create');

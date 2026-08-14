@@ -2140,7 +2140,7 @@ app.post('/api/import/parse', upload.single('file'), async (req, res) => {
     } else if (ext === 'xlsx' || ext === 'xls') {
       const sheetIndex = parseInt(req.body.sheetIndex) || 0;
       const headerRow = parseInt(req.body.headerRow) || 1;
-      result = parseExcelBuffer(req.file.buffer, { sheetIndex, headerRow });
+      result = await parseExcelBuffer(req.file.buffer, { sheetIndex, headerRow });
     } else {
       return res.status(400).json({ error: `Filtyp "${ext}" stöds inte. Använd CSV, TSV, XLSX eller XLS.` });
     }
@@ -2206,7 +2206,7 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     if (['csv', 'tsv', 'txt'].includes(ext)) {
       parsed = parseCsvBuffer(req.file.buffer);
     } else if (['xlsx', 'xls'].includes(ext)) {
-      parsed = parseExcelBuffer(req.file.buffer, {});
+      parsed = await parseExcelBuffer(req.file.buffer, {});
     } else {
       return res.status(400).json({ error: `Filtyp "${ext}" stöds inte` });
     }
@@ -2216,12 +2216,39 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     const resolvedSkuCol = skuColumn || headers.find(h => /sku|artnr|artikel/i.test(h)) || headers[0];
     const resolvedQtyCol = qtyColumn || headers.find(h => /qty|quantity|antal|lager|stock|saldo/i.test(h)) || headers[1];
     // Extra columns used when creating products that don't exist in Shopify yet.
-    const nameCol = headers.find(h => /benämning|namn|name|title|produkt|beskrivning/i.test(h));
-    const eanCol = headers.find(h => /ean|barcode|gtin|streckkod/i.test(h));
-    const costCol = headers.find(h => /grundpris|inköp|cost|pris/i.test(h));
-    const weightCol = headers.find(h => /vikt|weight/i.test(h));
-    const sizeCol = headers.find(h => /storlek|mått|size|dimension/i.test(h));
-    const dropshipCol = headers.find(h => /dropship|godkänd/i.test(h));
+    // "Benämning" is the TITLE in the inventory CSV but the TYPE in the rich
+    // product export (which has a separate "Namn" column) — resolve accordingly.
+    const H = (re) => headers.find(h => re.test(h));
+    const namnCol = H(/^namn$/i);
+    const benamningCol = H(/^benämning$/i);
+    const nameCol = namnCol || benamningCol || H(/name|title|beskrivning/i);
+    const typeCol = H(/produkttyp|kategori|^typ$/i) || (namnCol ? benamningCol : null);
+    const eanCol = H(/ean|barcode|gtin|streckkod/i);
+    const costCol = H(/grundpris|inköp/i) || H(/^pris/i) || H(/cost/i);
+    const weightCol = H(/vikt|weight/i);
+    const sizeCol = H(/produktens storlek|^storlek$/i);
+    const dropshipCol = H(/godkänd.*dropship|dropship.*godkänd|^godkänd/i);
+    // Rich metafield columns → Shopify metafield keys.
+    const metaCols = {
+      'custom.kollektion': H(/produktkollektion|^kollektion$/i),
+      'custom.fargnyans': H(/färgnyans|^färg$|color/i),
+      'custom.material': H(/^material$/i),
+      'custom.doft': H(/^doft$/i),
+      'custom.brinntid': H(/brinntid/i),
+      'custom.tvattrad': H(/tvättråd|tvattrad|skötsel/i),
+      'custom.info': H(/^information$|^info$/i),
+      'custom.hs_kod': H(/hs.?kod/i),
+      'custom.ursprungsland': H(/ursprung/i),
+      'custom.forpackningsantal': H(/förpackningsantal|forpackningsantal/i),
+      'custom.nyhet': H(/^nyhet$/i),
+    };
+    // Individual dimension columns (composed into custom.storlek + kept as own metafields).
+    const dimCols = {
+      diameter: H(/diameter/i), langd: H(/^längd$|^langd$/i), bredd: H(/^bredd$/i),
+      djup: H(/^djup$/i), hojd: H(/^höjd$|^hojd$/i),
+      specialmatt: H(/specialmått|specialmatt/i), innermatt: H(/innermått|innermatt/i),
+    };
+    const hasDimCols = Object.values(dimCols).some(Boolean);
 
     // Parse a Swedish/European decimal ("179,00" or "179.00") to a number.
     const parseNum = (val) => {
@@ -2229,11 +2256,25 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       const n = parseFloat(String(val).replace(/\s/g, '').replace(',', '.'));
       return isNaN(n) ? null : n;
     };
-    // Color is the part after the last comma in the supplier name
-    // ("TREASURE Urna S, Brun" -> "Brun").
-    const parseColor = (name) => {
-      if (!name || !name.includes(',')) return '';
-      return name.slice(name.lastIndexOf(',') + 1).trim();
+    const cell = (row, col) => (col ? String(row[col] ?? '').trim() : '');
+    // Color: prefer the dedicated column, else the part after the last comma in
+    // the supplier name ("TREASURE Urna S, Brun" -> "Brun").
+    const parseColor = (name) => (name && name.includes(',') ? name.slice(name.lastIndexOf(',') + 1).trim() : '');
+    // Compose individual dimensions into a readable size string ("Ø12,5×H8 cm").
+    const composeStorlek = (row) => {
+      const p = [];
+      const d = cell(row, dimCols.diameter); if (d) p.push('Ø' + d);
+      const l = cell(row, dimCols.langd); if (l) p.push('L' + l);
+      const b = cell(row, dimCols.bredd); if (b) p.push('B' + b);
+      const dj = cell(row, dimCols.djup); if (dj) p.push('D' + dj);
+      const h = cell(row, dimCols.hojd); if (h) p.push('H' + h);
+      let s = p.join('×');
+      if (s) s += ' cm';
+      const spec = cell(row, dimCols.specialmatt);
+      const inner = cell(row, dimCols.innermatt);
+      if (spec) s = (s ? s + ' · ' : '') + spec;
+      if (inner) s = (s ? s + ' · innermått ' : 'innermått ') + inner;
+      return s;
     };
 
     // Build SKU→newQty map + full row data from CSV
@@ -2244,36 +2285,57 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       if (!sku) continue;
       const qty = parseInt(row[resolvedQtyCol], 10);
       if (!isNaN(qty)) csvMap[sku] = qty;
-      const name = nameCol ? String(row[nameCol] || '').trim() : '';
+      const name = cell(row, nameCol);
+      // Size: composed from dimension columns, else the single size column.
+      const size = hasDimCols ? composeStorlek(row) : cell(row, sizeCol);
+      const color = cell(row, metaCols['custom.fargnyans']) || parseColor(name);
+
+      // Build the metafields object from the rich columns.
+      const metafields = {};
+      for (const [key, col] of Object.entries(metaCols)) {
+        if (key === 'custom.fargnyans') continue; // handled via `color` below
+        const v = cell(row, col);
+        if (v) metafields[key] = v;
+      }
+      if (color) metafields['custom.fargnyans'] = color;
+      if (size) metafields['custom.storlek'] = size;
+      // Keep individual dimensions as their own metafields too.
+      for (const [k, col] of Object.entries(dimCols)) {
+        const v = cell(row, col);
+        if (v) metafields['custom.' + k] = v;
+      }
+
       csvRows[sku] = {
         sku,
         name,
-        barcode: eanCol ? String(row[eanCol] || '').trim() : '',
+        product_type: cell(row, typeCol),
+        barcode: cell(row, eanCol),
         cost: costCol ? parseNum(row[costCol]) : null,
         weight: weightCol ? parseNum(row[weightCol]) : null,
-        size: sizeCol ? String(row[sizeCol] || '').trim() : '',
-        color: parseColor(name),
+        size,
+        color,
+        metafields,
         // Approved for dropship? If the column is absent, treat as approved.
-        dropshipOk: dropshipCol ? /^(ja|yes|true|1)$/i.test(String(row[dropshipCol] || '').trim()) : true,
+        dropshipOk: dropshipCol ? /^(ja|yes|true|1)$/i.test(cell(row, dropshipCol)) : true,
         qty: isNaN(qty) ? null : qty,
       };
     }
 
-    const skus = Object.keys(csvMap);
-    if (!skus.length) return res.status(400).json({ error: 'Inga giltiga SKU/antal-rader hittades' });
+    // SKUs to consider = every row (qty is optional; product-only files have no stock).
+    const skus = Object.keys(csvRows);
+    if (!skus.length) return res.status(400).json({ error: 'Inga giltiga SKU-rader hittades i filen' });
+    const hasQty = Object.keys(csvMap).length > 0;
 
     // Get the store
     const store = await db.getStoreById(storeId);
     if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
 
-    // Resolve the inventory location. Prefer a per-store configured GID
-    // (store.settings.inventory_location_gid) so we don't depend on the
-    // read_locations OAuth scope; fall back to the locations API if allowed.
+    // Resolve the inventory location (only needed when the file carries stock).
     let locationGid = store.settings?.inventory_location_gid || null;
-    if (!locationGid) {
+    if (hasQty && !locationGid) {
       try { locationGid = await shopifySync.getPrimaryLocationGid(store); } catch { locationGid = null; }
     }
-    if (!locationGid) {
+    if (hasQty && !locationGid) {
       return res.status(400).json({
         error: 'Ingen lagerplats konfigurerad. Sätt store.settings.inventory_location_gid (t.ex. "gid://shopify/Location/123") eller ge appen read_locations-scope.',
       });
@@ -2294,6 +2356,9 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       if (!variants || variants.length === 0) { notFound.push(sku); continue; }
       if (variants.length > 1) { duplicates.push(sku); continue; }
       const v = variants[0];
+      // Product is in Shopify → not a "new" candidate. Only build an inventory
+      // diff row when the file actually carries a quantity for this SKU.
+      if (!hasQty || csvMap[sku] == null) continue;
       if (!v.tracked) { untracked.push(sku); continue; }
 
       const currentQty = v.currentQty;
@@ -2351,7 +2416,8 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
           size: row.size || '',
           color: row.color || '',
           qty: row.qty,
-          product_type: '',
+          product_type: row.product_type || '',
+          metafields: row.metafields || {},
           tags: [],
           imageUrl: '',
         });
@@ -2491,11 +2557,11 @@ app.post('/api/inventory/create-products', async (req, res) => {
           ? p.tags
           : (p.tags ? String(p.tags).split(',').map(t => t.trim()).filter(Boolean) : []);
 
-        // Map deterministic CSV fields straight into Shopify metafields:
-        // dimensions -> custom.storlek, colour -> custom.fargnyans.
-        const metafields = {};
-        if (p.size && String(p.size).trim()) metafields['custom.storlek'] = String(p.size).trim();
-        if (p.color && String(p.color).trim()) metafields['custom.fargnyans'] = String(p.color).trim();
+        // Metafields: the full object mapped from the file (material, kollektion,
+        // storlek, etc.), plus size/colour fallbacks for older callers.
+        const metafields = { ...(p.metafields && typeof p.metafields === 'object' ? p.metafields : {}) };
+        if (p.size && String(p.size).trim() && !metafields['custom.storlek']) metafields['custom.storlek'] = String(p.size).trim();
+        if (p.color && String(p.color).trim() && !metafields['custom.fargnyans']) metafields['custom.fargnyans'] = String(p.color).trim();
 
         const productData = sanitizeHtmlFields({
           title: String(p.title || sku),
