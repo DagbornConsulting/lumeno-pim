@@ -2575,6 +2575,7 @@ app.post('/api/inventory/create-products', async (req, res) => {
           weight: p.weight != null && p.weight !== '' ? Number(p.weight) : null,
           metafields,
           status: 'draft',
+          is_staged: true, // lands in the "Nya produkter" staging list, not the main catalogue
           store_id: storeId,
           variants: [{
             sku,
@@ -2941,7 +2942,7 @@ app.get('/api/db/products', async (req, res) => {
     const storeId = getStoreId(req);
     if (!storeId) return res.json({ data: [], count: 0, total: 0 });
 
-    const { vendor, type, status, tags, search, storeFilter, syncFilter, imageFilter, limit, offset } = req.query;
+    const { vendor, type, status, tags, search, storeFilter, syncFilter, imageFilter, staging, limit, offset } = req.query;
 
     const result = await db.getProducts({
       vendor,
@@ -2953,6 +2954,7 @@ app.get('/api/db/products', async (req, res) => {
       storeFilter, // 'published', 'unpublished', or 'error'
       syncFilter, // 'pending' - visar produkter som behöver synkas
       imageFilter, // 'with' eller 'without' — produkter med/utan bilder
+      staging, // 'only' — bara staging-utkast (Nya produkter)
       limit: parseInt(limit) || 3000, // Max 3000 per request
       offset: parseInt(offset) || 0
     });
@@ -3485,6 +3487,8 @@ app.post('/api/db/products/:id/publish', async (req, res) => {
             if (product.product_category) {
               try { await shopifySync.setProductCategory(store, newShopifyId, product.product_category); } catch (e) { console.warn('category push:', e.message); }
             }
+            // Now live in Shopify → leave the staging list, join the main catalogue.
+            try { await supabase.from('products').update({ is_staged: false }).eq('id', productId); } catch (_) {}
           }
           syncResults.push({ storeId, success: true, action: created?.linkedExisting ? 'linked' : 'created' });
         }

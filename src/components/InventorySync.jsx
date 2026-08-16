@@ -3,7 +3,10 @@ import { Upload, RefreshCw, CheckCircle2, ArrowUp, ArrowDown, Minus, Sparkles, P
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
-export default function InventorySync() {
+export default function InventorySync({ mode = 'both', onCreated } = {}) {
+  // mode: 'inventory' = bara lageruppdatering · 'import' = bara skapa nya produkter · 'both' = allt
+  const showUpdate = mode !== 'import';
+  const showCreate = mode !== 'inventory';
   const [storeId, setStoreId] = useState(null);
   const [stores, setStores] = useState([]);
   const [file, setFile] = useState(null);
@@ -16,7 +19,7 @@ export default function InventorySync() {
   const fileRef = useRef();
 
   // "Create new" tab state
-  const [activeTab, setActiveTab] = useState('update');
+  const [activeTab, setActiveTab] = useState(mode === 'import' ? 'create' : 'update');
   const [newRows, setNewRows] = useState([]);
   const [newSelected, setNewSelected] = useState(new Set());
   const [aiLoading, setAiLoading] = useState(false);
@@ -254,9 +257,10 @@ export default function InventorySync() {
         created += data.created || 0;
         failed += data.failed || 0;
       }
-      showToast(`${created} produkter skapade som utkast${failed ? `, ${failed} misslyckades` : ''}`, failed ? 'warning' : 'success');
+      showToast(`${created} produkter skapade som utkast${failed ? `, ${failed} misslyckades` : ''}. Se "Nya produkter".`, failed ? 'warning' : 'success');
       setNewRows(rows => rows.filter(r => !newSelected.has(r.sku)));
       setNewSelected(new Set());
+      if (created > 0 && typeof onCreated === 'function') onCreated(created);
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -274,8 +278,14 @@ export default function InventorySync() {
 
       <div className="content-header">
         <div>
-          <h1 className="content-title">Uppdatera lagersaldo</h1>
-          <p className="content-subtitle">Ladda upp leverantörens lagerfil, synka saldon och skapa produkter som saknas i Shopify.</p>
+          <h1 className="content-title">{mode === 'import' ? 'Importera produkter' : 'Uppdatera lagersaldo'}</h1>
+          <p className="content-subtitle">
+            {mode === 'import'
+              ? 'Ladda upp en leverantörsfil. Nya produkter (som inte finns i Shopify) skapas som utkast i "Nya produkter" där du grupperar och berikar innan de pushas.'
+              : mode === 'inventory'
+              ? 'Ladda upp leverantörens lagerfil och synka saldon mot Shopify.'
+              : 'Ladda upp leverantörens lagerfil, synka saldon och skapa produkter som saknas i Shopify.'}
+          </p>
         </div>
       </div>
 
@@ -363,18 +373,22 @@ export default function InventorySync() {
         <section className="settings-section">
           {/* Tabs */}
           <div className="settings-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <button
-              className={`btn ${activeTab === 'update' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setActiveTab('update')}
-            >
-              Uppdatera lager ({diff.changed || 0})
-            </button>
-            <button
-              className={`btn ${activeTab === 'create' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => setActiveTab('create')}
-            >
-              <PackagePlus size={14} /> Skapa nya ({diff.newCount || 0})
-            </button>
+            {showUpdate && (
+              <button
+                className={`btn ${activeTab === 'update' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setActiveTab('update')}
+              >
+                Uppdatera lager ({diff.changed || 0})
+              </button>
+            )}
+            {showCreate && (
+              <button
+                className={`btn ${activeTab === 'create' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setActiveTab('create')}
+              >
+                <PackagePlus size={14} /> Skapa nya ({diff.newCount || 0})
+              </button>
+            )}
             {diff.alreadyInPimCount > 0 && (
               <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-secondary, #888)' }}>
                 {diff.alreadyInPimCount} finns redan i PIM (ej pushade)

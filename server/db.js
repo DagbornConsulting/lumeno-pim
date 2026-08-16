@@ -132,6 +132,7 @@ export const db = {
     storeFilter, // 'published' or 'unpublished'
     syncFilter, // 'pending' - visar bara produkter som behöver synkas till Central
     imageFilter, // 'with' = bara produkter med minst en bild, 'without' = bara utan
+    staging, // 'only' = bara staging-utkast (Nya produkter); annars döljs staging
     limit = 100,
     offset = 0
   } = {}) {
@@ -153,6 +154,14 @@ export const db = {
 
     // Filter by store_id (required)
     if (storeId) baseQuery = baseQuery.eq('store_id', storeId);
+
+    // Staging: the main catalogue hides staged import-drafts; the "Nya produkter"
+    // view asks for them explicitly. Tolerate null (legacy rows) as not-staged.
+    if (staging === 'only') {
+      baseQuery = baseQuery.eq('is_staged', true);
+    } else {
+      baseQuery = baseQuery.or('is_staged.is.null,is_staged.eq.false');
+    }
 
     // Apply database-level filters
     if (vendor) baseQuery = baseQuery.eq('vendor', vendor);

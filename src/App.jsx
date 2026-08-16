@@ -18,8 +18,9 @@ import ImageSync from './components/ImageSync';
 import PriceManager from './components/PriceManager';
 import MarginEngine from './components/MarginEngine';
 import InventorySync from './components/InventorySync';
-import ProductImport from './components/ProductImport';
+import StagingProducts from './components/StagingProducts';
 import ShopifyImport from './components/ShopifyImport';
+import { transformDbProduct } from './lib/transformProduct';
 import StoreManager from './components/StoreManager';
 import CollectionsView from './components/CollectionsView';
 import ImageImportView from './components/ImageImportView';
@@ -64,6 +65,8 @@ export default function App() {
   const [hasMoreProducts, setHasMoreProducts] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [totalProductCount, setTotalProductCount] = useState(0);
+  const [stagedCount, setStagedCount] = useState(0);
+  const [stagingReloadKey, setStagingReloadKey] = useState(0);
   const [allBrands, setAllBrands] = useState([]);
   const [allTypes, setAllTypes] = useState([]);
   const [allTags, setAllTags] = useState([]);
@@ -132,6 +135,15 @@ export default function App() {
     }
   }, [isAuthenticated]);
 
+  // Keep the "Nya produkter" nav badge in sync (staged import-drafts count).
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    fetch(`${API_URL}/db/products?staging=only&limit=1`)
+      .then(r => r.json())
+      .then(d => setStagedCount(d.total ?? d.count ?? 0))
+      .catch(() => {});
+  }, [isAuthenticated, stagingReloadKey]);
+
   // Reload data when filters change (use filterLoading instead of full loading screen)
   useEffect(() => {
     // Skip on initial mount (loading is already true from useState)
@@ -192,75 +204,7 @@ export default function App() {
       // Transform database format to app format
       const transformedProducts = (productsData.data || []).map(p => {
         try {
-          return {
-            id: p.id,
-            title: p.title || '',
-            handle: p.handle || '',
-            description: p.description || '',
-            vendor: p.vendor || '',
-            type: p.product_type || '',
-            productCategory: p.product_category || '',
-            tags: p.tags || [],
-            status: p.status || 'draft',
-            publishedOnOnlineStore: p.published_on_online_store ?? true,
-            price: p.default_price,
-            compareAtPrice: p.default_compare_at_price,
-            cost: p.default_cost,
-            marginMultiplier: p.margin_multiplier,
-            supplierId: p.supplier_id,
-            sku: p.sku || '',
-            barcode: p.barcode || '',
-            seoTitle: p.seo_title || '',
-            seoDescription: p.seo_description || '',
-            chargeTax: p.charge_tax ?? true,
-            taxCode: p.tax_code || '',
-            requiresShipping: p.requires_shipping ?? true,
-            inventoryPolicy: p.inventory_policy || 'deny',
-            weight: p.weight,
-            weightUnit: p.weight_unit || 'kg',
-            variantSchema: p.variant_schema || '',
-            metafields: p.metafields || {},
-            // Google Shopping
-            googleProductCategory: p.google_product_category || '',
-            googleGender: p.google_gender || '',
-            googleAgeGroup: p.google_age_group || '',
-            googleMpn: p.google_mpn || '',
-            googleCondition: p.google_condition || '',
-            googleCustomLabel0: p.google_custom_label_0 || '',
-            googleCustomLabel1: p.google_custom_label_1 || '',
-            // Feed
-            feedTitle: p.feed_title || '',
-            feedDescription: p.feed_description || '',
-            // Relations
-            variants: (p.variants || []).map(v => ({
-              id: v.id,
-              sku: v.sku || '',
-              barcode: v.barcode || '',
-              option1Name: v.option1_name || '',
-              option1Value: v.option1_value || '',
-              option2Name: v.option2_name || '',
-              option2Value: v.option2_value || '',
-              option3Name: v.option3_name || '',
-              option3Value: v.option3_value || '',
-              price: v.price,
-              compareAtPrice: v.compare_at_price,
-              cost: v.cost,
-              weight: v.weight,
-              weightUnit: v.weight_unit || 'kg',
-              inventoryQuantity: v.inventory_quantity || 0,
-              inventoryPolicy: v.inventory_policy || 'deny',
-              position: v.position
-            })),
-            images: (p.images || []).map(img => ({
-              id: img.id,
-              url: img.url || '',
-              alt: img.alt_text || '',
-              position: img.position
-            })),
-            storeProducts: p.store_products || [],
-            createdAt: p.created_at,
-            updatedAt: p.updated_at
-          };
+          return transformDbProduct(p);
         } catch (e) {
           console.error('Error transforming product:', p.id, e);
           return null;
@@ -888,6 +832,14 @@ export default function App() {
             <span className="nav-label">Importera produkter</span>
           </div>
           <div
+            className={`nav-item ${activeView === 'staging' ? 'active' : ''}`}
+            onClick={() => setActiveView('staging')}
+          >
+            <Sparkles size={20} />
+            <span className="nav-label">Nya produkter</span>
+            {stagedCount > 0 && <span className="nav-badge">{stagedCount}</span>}
+          </div>
+          <div
             className={`nav-item ${activeView === 'inventory' ? 'active' : ''}`}
             onClick={() => setActiveView('inventory')}
           >
@@ -1023,7 +975,17 @@ export default function App() {
           )}
 
           {activeView === 'inventory' && (
-            <InventorySync />
+            <InventorySync mode="inventory" />
+          )}
+
+          {activeView === 'staging' && (
+            <StagingProducts
+              stores={stores}
+              reloadKey={stagingReloadKey}
+              onCountChange={setStagedCount}
+              onEditProduct={(row) => setSelectedProductForEdit(transformDbProduct(row))}
+              onGoToImport={() => setActiveView('import')}
+            />
           )}
 
           {activeView === 'mapping' && (
@@ -1043,7 +1005,7 @@ export default function App() {
           )}
 
           {activeView === 'import' && (
-            <ImportView onSelectCsv={() => setActiveView('inventory')} storeId={stores[0]?.id || localStorage.getItem('pim_active_store_id')} />
+            <ImportView onImported={() => setActiveView('staging')} storeId={stores[0]?.id || localStorage.getItem('pim_active_store_id')} />
           )}
 
           {activeView === 'settings' && (
@@ -1059,7 +1021,7 @@ export default function App() {
           stores={stores}
           onSave={handleProductSave}
           onDelete={handleDeleteProduct}
-          onClose={() => setSelectedProductForEdit(null)}
+          onClose={() => { setSelectedProductForEdit(null); if (activeView === 'staging') setStagingReloadKey(k => k + 1); }}
         />
       )}
 
@@ -2043,16 +2005,23 @@ function SuppliersView({ onConfigureMapping }) {
 }
 
 // Import View Component
-function ImportView({ onSelectCsv, storeId }) {
+function ImportView({ onImported, storeId }) {
   const [showCsvImport, setShowCsvImport] = useState(false);
   const [showShopifyImport, setShowShopifyImport] = useState(false);
 
   if (showCsvImport) {
     return (
-      <ProductImport
-        onClose={() => setShowCsvImport(false)}
-        onImportComplete={() => setShowCsvImport(false)}
-      />
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div className="content-header" style={{ flexShrink: 0 }}>
+          <div />
+          <button className="btn btn-ghost" onClick={() => setShowCsvImport(false)}>
+            <X size={18} /> Tillbaka
+          </button>
+        </div>
+        {/* Rich import: auto-detect columns, compare vs Shopify, dropship filter,
+            map rich columns → metafields. New products land in "Nya produkter". */}
+        <InventorySync mode="import" onCreated={() => { onImported?.(); }} />
+      </div>
     );
   }
 
@@ -2091,7 +2060,7 @@ function ImportView({ onSelectCsv, storeId }) {
           <FileSpreadsheet size={32} style={{ marginBottom: '12px', color: 'var(--accent)' }} />
           <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>Leverantörsfil (CSV/Excel)</h3>
           <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-            Ladda upp en CSV- eller Excel-fil och mappa kolumner mot PIM-fält.
+            Ladda upp en fil — kolumner känns igen automatiskt, jämförs mot Shopify och nya produkter skapas som utkast i "Nya produkter".
           </p>
         </div>
 
