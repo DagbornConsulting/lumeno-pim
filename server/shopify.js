@@ -1046,6 +1046,30 @@ export const shopifySync = {
     return num ? `gid://shopify/Location/${num}` : null;
   },
 
+  // Fallback that does NOT need the read_locations scope: read a location GID
+  // straight off a product's inventory levels (allowed with read_inventory +
+  // read_products). Used when read_locations is not granted so inventory sync
+  // still resolves a location without merchant approval.
+  async getAnyInventoryLocationGid(store) {
+    const url = `https://${store.domain}/admin/api/${store.api_version || '2026-01'}/graphql.json`;
+    const query = `{ products(first: 10) { nodes { variants(first: 1) { nodes { inventoryItem { inventoryLevels(first: 3) { nodes { location { id } } } } } } } } }`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': store.access_token },
+      body: JSON.stringify({ query }),
+    });
+    const j = await r.json();
+    if (j.errors) throw new Error(`Shopify GraphQL: ${JSON.stringify(j.errors)}`);
+    for (const p of j.data?.products?.nodes || []) {
+      for (const v of p.variants?.nodes || []) {
+        for (const lv of v.inventoryItem?.inventoryLevels?.nodes || []) {
+          if (lv.location?.id) return lv.location.id; // already a GID
+        }
+      }
+    }
+    return null;
+  },
+
   // Fetch the managed CONTENT of a product from Shopify in the sync-engine shape:
   // { title, body_html, product_type, tags: [...], metafields: { "ns.key": value } }.
   async fetchProductContent(store, shopifyProductId) {

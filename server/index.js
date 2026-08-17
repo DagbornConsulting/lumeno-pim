@@ -2331,9 +2331,22 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
     if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
 
     // Resolve the inventory location (only needed when the file carries stock).
+    // Prefer the stored GID; else the locations API (needs read_locations); else
+    // derive it from a product's inventory levels (works with read_inventory) and
+    // persist it so a cleared settings object self-heals and never breaks again.
     let locationGid = store.settings?.inventory_location_gid || null;
     if (hasQty && !locationGid) {
       try { locationGid = await shopifySync.getPrimaryLocationGid(store); } catch { locationGid = null; }
+      if (!locationGid) {
+        try { locationGid = await shopifySync.getAnyInventoryLocationGid(store); } catch { locationGid = null; }
+      }
+      if (locationGid) {
+        try {
+          await supabase.from('stores')
+            .update({ settings: { ...(store.settings || {}), inventory_location_gid: locationGid } })
+            .eq('id', storeId);
+        } catch (_) { /* best-effort cache */ }
+      }
     }
     if (hasQty && !locationGid) {
       return res.status(400).json({
