@@ -19,6 +19,7 @@ import PriceManager from './components/PriceManager';
 import MarginEngine from './components/MarginEngine';
 import InventorySync from './components/InventorySync';
 import StagingProducts from './components/StagingProducts';
+import SeoInsights from './components/SeoInsights';
 import ShopifyImport from './components/ShopifyImport';
 import { transformDbProduct } from './lib/transformProduct';
 import StoreManager from './components/StoreManager';
@@ -813,6 +814,13 @@ export default function App() {
             <Zap size={20} />
             <span className="nav-label">Produkt feeds</span>
           </div>
+          <div
+            className={`nav-item ${activeView === 'seo' ? 'active' : ''}`}
+            onClick={() => setActiveView('seo')}
+          >
+            <Search size={20} />
+            <span className="nav-label">SEO & Insikter</span>
+          </div>
         </nav>
 
         <nav className="nav-section">
@@ -998,6 +1006,10 @@ export default function App() {
           
           {activeView === 'feeds' && (
             <FeedsView stores={stores} />
+          )}
+
+          {activeView === 'seo' && (
+            <SeoInsights />
           )}
 
           {activeView === 'suppliers' && (

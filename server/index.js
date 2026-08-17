@@ -16,6 +16,7 @@ import shopifyApp from './shopify-app.js';
 import { processImage, downloadImage, generateAltText, getImageMetadata } from './services/image-processor.js';
 import { feedService } from './feed-generator.js';
 import { computeProductDiff, buildSyncPlan } from './services/sync-engine.js';
+import * as googleSeo from './services/google-seo.js';
 
 // Heavy modules — loaded in the background so they don't block cold-start parsing
 let anthropic = null;
@@ -2869,11 +2870,132 @@ app.post('/api/images/metadata', upload.single('image'), async (req, res) => {
 // ============================================
 
 app.get('/api/health', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'ok',
     apiKeyConfigured: !!anthropic,
     timestamp: new Date().toISOString()
   });
+});
+
+// ============================================
+// SEO & INSIGHTS (Google Search Console + GA4)
+// Native integration via a Google service account. Property/site config lives
+// in store.settings.google; the service-account key is a server secret.
+// ============================================
+
+// YYYY-MM-DD for `days` ago (or today when days=0). Avoids timezone drift.
+function ymdDaysAgo(days) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+function seoRange(req) {
+  const days = Math.max(1, Math.min(365, parseInt(req.query.days) || 28));
+  return { days, startDate: ymdDaysAgo(days), endDate: ymdDaysAgo(1) };
+}
+async function seoConfig(req) {
+  const storeId = await resolveStoreId(req);
+  const store = storeId ? await db.getStoreById(storeId) : null;
+  const g = store?.settings?.google || {};
+  return { storeId, store, siteUrl: g.gsc_site_url || null, propertyId: g.ga4_property_id || null };
+}
+
+// Connection status: is the service account present + what is configured.
+app.get('/api/seo/status', async (req, res) => {
+  try {
+    const { store, siteUrl, propertyId } = await seoConfig(req);
+    let email = null;
+    try { email = googleSeo.getServiceAccount()?.client_email || null; } catch (_) {}
+    res.json({
+      credentials: googleSeo.isConfigured(),
+      serviceAccountEmail: email,
+      gscSiteUrl: siteUrl,
+      ga4PropertyId: propertyId,
+      storeConnected: !!store,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Save GSC site url + GA4 property id to store.settings.google.
+app.post('/api/seo/config', async (req, res) => {
+  try {
+    const storeId = await resolveStoreId(req);
+    if (!storeId) return res.status(400).json({ error: 'Ingen butik' });
+    const store = await db.getStoreById(storeId);
+    const { gscSiteUrl, ga4PropertyId } = req.body || {};
+    const google = {
+      ...(store.settings?.google || {}),
+      ...(gscSiteUrl !== undefined ? { gsc_site_url: gscSiteUrl || null } : {}),
+      ...(ga4PropertyId !== undefined ? { ga4_property_id: ga4PropertyId || null } : {}),
+    };
+    const { error } = await supabase.from('stores')
+      .update({ settings: { ...(store.settings || {}), google } }).eq('id', storeId);
+    if (error) throw error;
+    res.json({ ok: true, google });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// List GSC sites the service account can see (to pick the exact siteUrl).
+app.get('/api/seo/gsc/sites', async (req, res) => {
+  try { res.json({ sites: await googleSeo.gscListSites() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Top search queries (clicks/impressions/ctr/position).
+app.get('/api/seo/gsc/queries', async (req, res) => {
+  try {
+    const { siteUrl } = await seoConfig(req);
+    if (!siteUrl) return res.status(400).json({ error: 'GSC-webbadress ej konfigurerad' });
+    const { startDate, endDate } = seoRange(req);
+    const rows = await googleSeo.gscSearchAnalytics({
+      siteUrl, startDate, endDate, dimensions: ['query'],
+      rowLimit: Math.min(500, parseInt(req.query.limit) || 200),
+    });
+    res.json({ rows, startDate, endDate });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Top pages by search performance.
+app.get('/api/seo/gsc/pages', async (req, res) => {
+  try {
+    const { siteUrl } = await seoConfig(req);
+    if (!siteUrl) return res.status(400).json({ error: 'GSC-webbadress ej konfigurerad' });
+    const { startDate, endDate } = seoRange(req);
+    const rows = await googleSeo.gscSearchAnalytics({
+      siteUrl, startDate, endDate, dimensions: ['page'],
+      rowLimit: Math.min(500, parseInt(req.query.limit) || 200),
+    });
+    res.json({ rows, startDate, endDate });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GA4 summary metrics for the period.
+app.get('/api/seo/ga4/summary', async (req, res) => {
+  try {
+    const { propertyId } = await seoConfig(req);
+    if (!propertyId) return res.status(400).json({ error: 'GA4 property ej konfigurerad' });
+    const { startDate, endDate } = seoRange(req);
+    const { rows } = await googleSeo.ga4RunReport({
+      propertyId, startDate, endDate, dimensions: [],
+      metrics: ['sessions', 'totalUsers', 'screenPageViews', 'conversions', 'averageSessionDuration', 'bounceRate'],
+    });
+    res.json({ metrics: rows[0] || {}, startDate, endDate });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GA4 top landing pages (organic-relevant) by sessions.
+app.get('/api/seo/ga4/landing-pages', async (req, res) => {
+  try {
+    const { propertyId } = await seoConfig(req);
+    if (!propertyId) return res.status(400).json({ error: 'GA4 property ej konfigurerad' });
+    const { startDate, endDate } = seoRange(req);
+    const { rows } = await googleSeo.ga4RunReport({
+      propertyId, startDate, endDate, dimensions: ['landingPagePlusQueryString'],
+      metrics: ['sessions', 'conversions'], limit: Math.min(500, parseInt(req.query.limit) || 100),
+      orderByMetric: 'sessions',
+    });
+    res.json({ rows, startDate, endDate });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ============================================
