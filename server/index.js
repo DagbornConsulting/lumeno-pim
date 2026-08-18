@@ -3143,6 +3143,132 @@ Svara ENBART med giltig JSON i samma ordning:
   }
 });
 
+// List the store's blogs so the UI can pick where to publish drafts.
+app.get('/api/seo/blogs', async (req, res) => {
+  try {
+    const storeId = await resolveStoreId(req);
+    const store = storeId ? await db.getStoreById(storeId) : null;
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad' });
+    res.json({ blogs: await shopifySync.getBlogs(store) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Never let an em dash through (store style rule).
+const noEmDash = (s) => String(s || '').replace(/\s*—\s*/g, ', ').replace(/\s*–\s*/g, ' - ');
+
+// Generate a full article with Claude, in the store's tone and grounded in the
+// catalogue, with internal links + FAQ (AEO), and create it as a DRAFT in Shopify.
+app.post('/api/seo/generate-article', async (req, res) => {
+  try {
+    if (!anthropic) return res.status(400).json({ error: 'API key not configured' });
+    const storeId = await resolveStoreId(req);
+    const store = storeId ? await db.getStoreById(storeId) : null;
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad' });
+
+    const { title, type, angle, keywords = [], blogId: reqBlogId } = req.body || {};
+    if (!title) return res.status(400).json({ error: 'title krävs' });
+
+    // Resolve target blog (default: first).
+    const blogs = await shopifySync.getBlogs(store);
+    if (!blogs.length) return res.status(400).json({ error: 'Ingen blogg finns i Shopify. Skapa en blogg (Content → Blogginlägg) först.' });
+    const blogId = reqBlogId || blogs[0].id;
+
+    // Catalogue grounding: tone samples + relevant products + collections.
+    const { data: allProducts } = await db.getProducts({ storeId, limit: 20000 });
+    const products = allProducts || [];
+    const kw = [title, type, ...(Array.isArray(keywords) ? keywords : [])].join(' ').toLowerCase();
+    const kwTokens = kw.split(/[^a-zåäö0-9]+/i).filter(t => t.length > 2);
+    const scoreP = (p) => {
+      const hay = `${p.title} ${p.product_type || ''} ${(p.tags || []).join(' ')}`.toLowerCase();
+      return kwTokens.reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0);
+    };
+    const relevant = products
+      .filter(p => p.handle)
+      .map(p => ({ p, s: scoreP(p) }))
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 14)
+      .map(({ p }) => ({ title: p.title, url: `/products/${p.handle}`, type: p.product_type || '' }));
+    // Tone: a few of the richest existing descriptions.
+    const toneSamples = products
+      .filter(p => stripHtmlLen(p.description) > 120)
+      .sort((a, b) => stripHtmlLen(b.description) - stripHtmlLen(a.description))
+      .slice(0, 3)
+      .map(p => String(p.description).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 400));
+    let collections = [];
+    try { collections = (await shopifySync.getCollectionsForLinks(store)).slice(0, 40).map(c => ({ title: c.title, url: `/collections/${c.handle}` })); } catch (_) {}
+    // Prefer collections whose title matches the topic for internal links.
+    const relCollections = collections.filter(c => kwTokens.some(t => c.title.toLowerCase().includes(t))).slice(0, 8);
+
+    const linkList = [...relCollections, ...relevant].slice(0, 16)
+      .map(l => `- ${l.title}: ${l.url}`).join('\n');
+
+    const prompt = `Du är innehållsskribent för den svenska heminredningsbutiken "Lumeno Home". Skriv en komplett, säljande men trovärdig bloggartikel på svenska.
+
+ARTIKEL: "${title}"
+Typ: ${type || 'guide'}${angle ? `\nVinkel: ${angle}` : ''}${keywords?.length ? `\nSökord att väva in naturligt: ${keywords.join(', ')}` : ''}
+
+BUTIKENS TON (härma stil och tilltal, inte innehållet):
+${toneSamples.map((t, i) => `${i + 1}. ${t}`).join('\n') || '(vänlig, konkret, inspirerande svensk heminredningston)'}
+
+INTERNLÄNKAR (använd 4-8 av dessa som <a href="URL">ankartext</a>, väv in naturligt i brödtexten):
+${linkList || '(inga tillgängliga)'}
+
+HÅRDA KRAV:
+- Skriv på svenska. Använd ALDRIG tankstreck (em dash "—" eller "–"). Använd komma, punkt eller parentes i stället.
+- SEO-struktur: en tydlig inledning, flera <h2>-sektioner, <h3> vid behov, punktlistor (<ul><li>). INGEN <h1> (titeln blir H1 automatiskt).
+- Avsluta med en sektion "<h2>Vanliga frågor</h2>" med 4-6 konkreta fråga/svar (AEO), där varje fråga är en <h3> och svaret ett kort stycke.
+- Internlänkarna ska peka på URL:erna ovan (relativa, /collections/... eller /products/...).
+- Naturligt språk, inga påhittade fakta om specifika produkter.
+
+Svara ENBART med giltig JSON:
+{"metaTitle":"<=60 tecken","metaDescription":"<=155 tecken","excerpt":"1-2 meningar","tags":["3-6 taggar"],"bodyHtml":"<p>...</p><h2>...</h2>...","faq":[{"q":"...","a":"..."}]}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = response.content[0].text;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return res.status(502).json({ error: 'Kunde inte tolka AI-svaret' });
+    let art;
+    try { art = JSON.parse(jsonMatch[0]); } catch { return res.status(502).json({ error: 'Ogiltig JSON från AI' }); }
+
+    // Sanitise + enforce no em dash, then append FAQ JSON-LD for AEO.
+    let bodyHtml = noEmDash(sanitizeHtmlLib(String(art.bodyHtml || ''), {
+      allowedTags: ['p', 'h2', 'h3', 'h4', 'ul', 'ol', 'li', 'strong', 'em', 'a', 'blockquote', 'br'],
+      allowedAttributes: { a: ['href', 'title'] },
+    }));
+    const faq = Array.isArray(art.faq) ? art.faq.filter(f => f?.q && f?.a) : [];
+    if (faq.length) {
+      const ld = { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: faq.map(f => ({ '@type': 'Question', name: noEmDash(f.q), acceptedAnswer: { '@type': 'Answer', text: noEmDash(f.a) } })) };
+      bodyHtml += `\n<script type="application/ld+json">${JSON.stringify(ld)}</script>`;
+    }
+
+    const created = await shopifySync.createArticle(store, blogId, {
+      title: noEmDash(title),
+      bodyHtml,
+      summaryHtml: noEmDash(art.excerpt || ''),
+      tags: Array.isArray(art.tags) ? art.tags : [],
+      metaTitle: noEmDash(art.metaTitle || title).slice(0, 70),
+      metaDescription: noEmDash(art.metaDescription || '').slice(0, 320),
+      published: false, // DRAFT
+    });
+
+    res.json({
+      ok: true,
+      article: { id: created?.id, handle: created?.handle, title: created?.title },
+      blog: blogs.find(b => String(b.id) === String(blogId)) || blogs[0],
+      adminUrl: `https://${store.domain}/admin/blogs/${String(blogId).replace(/\D/g, '')}/articles/${created?.id}`,
+      meta: { metaTitle: art.metaTitle, metaDescription: art.metaDescription, tags: art.tags, faqCount: faq.length },
+    });
+  } catch (e) {
+    console.error('Generate article error:', e);
+    const msg = e.status === 529 ? 'Claude API är överbelastad. Försök igen.' : e.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
 // ============================================
 // IMAGE SYNC ENDPOINTS
 // ============================================

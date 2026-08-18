@@ -1070,6 +1070,52 @@ export const shopifySync = {
     return null;
   },
 
+  // --- Blog / article (for SEO content publishing) ---
+
+  async getBlogs(store) {
+    const client = this.getClient(store);
+    const data = await client.request('/blogs.json?limit=50');
+    return (data.blogs || []).map(b => ({ id: b.id, title: b.title, handle: b.handle }));
+  },
+
+  // Collection titles + handles, used to build internal links in articles.
+  async getCollectionsForLinks(store) {
+    const client = this.getClient(store);
+    const out = [];
+    for (const ep of ['/custom_collections.json?limit=250', '/smart_collections.json?limit=250']) {
+      try {
+        const d = await client.request(ep);
+        const arr = d.custom_collections || d.smart_collections || [];
+        for (const c of arr) out.push({ title: c.title, handle: c.handle });
+      } catch (_) { /* scope may be missing; skip */ }
+    }
+    return out;
+  },
+
+  // Create a blog article. Defaults to a DRAFT (published:false). SEO title +
+  // description go in the standard global.title_tag / global.description_tag
+  // metafields so Shopify's SEO fields are populated.
+  async createArticle(store, blogId, { title, bodyHtml, summaryHtml, tags, author, metaTitle, metaDescription, published = false }) {
+    const client = this.getClient(store);
+    const metafields = [];
+    if (metaTitle) metafields.push({ namespace: 'global', key: 'title_tag', value: String(metaTitle), type: 'single_line_text_field' });
+    if (metaDescription) metafields.push({ namespace: 'global', key: 'description_tag', value: String(metaDescription), type: 'single_line_text_field' });
+    const article = {
+      title,
+      body_html: bodyHtml || '',
+      published: !!published,
+      author: author || 'Lumeno',
+    };
+    if (summaryHtml) article.summary_html = summaryHtml;
+    if (tags) article.tags = Array.isArray(tags) ? tags.join(', ') : String(tags);
+    if (metafields.length) article.metafields = metafields;
+    const data = await client.request(`/blogs/${String(blogId).replace(/\D/g, '')}/articles.json`, {
+      method: 'POST',
+      body: JSON.stringify({ article }),
+    });
+    return data.article;
+  },
+
   // Fetch the managed CONTENT of a product from Shopify in the sync-engine shape:
   // { title, body_html, product_type, tags: [...], metafields: { "ns.key": value } }.
   async fetchProductContent(store, shopifyProductId) {

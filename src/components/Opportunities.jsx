@@ -28,6 +28,10 @@ export default function Opportunities({ onOpenProduct }) {
   // Articles
   const [articles, setArticles] = useState(null);
   const [artBusy, setArtBusy] = useState(false);
+  const [blogs, setBlogs] = useState(null);
+  const [blogId, setBlogId] = useState('');
+  const [genBusy, setGenBusy] = useState(''); // article key being generated
+  const [genResult, setGenResult] = useState({}); // key -> { adminUrl, title }
 
   const showToast = (msg, type = 'success') => { setToast({ msg, type }); setTimeout(() => setToast(null), 4500); };
 
@@ -95,8 +99,32 @@ export default function Opportunities({ onOpenProduct }) {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Fel');
       setArticles(data.clusters || []);
+      // Load target blogs for publishing drafts.
+      if (!blogs) {
+        try {
+          const br = await fetch(`${API_URL}/seo/blogs`);
+          const bd = await br.json();
+          setBlogs(bd.blogs || []);
+          if (bd.blogs?.[0]) setBlogId(String(bd.blogs[0].id));
+        } catch { /* ignore */ }
+      }
     } catch (e) { showToast(e.message, 'error'); }
     finally { setArtBusy(false); }
+  };
+
+  const generateArticle = async (key, a) => {
+    setGenBusy(key);
+    try {
+      const r = await fetch(`${API_URL}/seo/generate-article`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: a.title, type: a.type, angle: a.angle, keywords: a.keywords || [], blogId: blogId || undefined }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Fel');
+      setGenResult(prev => ({ ...prev, [key]: { adminUrl: data.adminUrl, title: data.article?.title, blog: data.blog?.title, faq: data.meta?.faqCount } }));
+      showToast(`Utkast skapat i Shopify (${data.blog?.title || 'blogg'})`);
+    } catch (e) { showToast(e.message, 'error'); }
+    finally { setGenBusy(''); }
   };
 
   if (loading) return <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-secondary,#888)' }}>Analyserar katalogen…</div>;
@@ -197,25 +225,51 @@ export default function Opportunities({ onOpenProduct }) {
             <Sparkles size={14} /> {artBusy ? 'Genererar…' : 'Föreslå artiklar (AI)'}
           </button>
         </div>
-        {!articles && <p style={{ fontSize: 13, color: 'var(--text-secondary,#888)' }}>AI föreslår artiklar utifrån ditt faktiska sortiment (produkttyper + kategorier). Senare vässas de av Search Console-data.</p>}
+        {!articles && <p style={{ fontSize: 13, color: 'var(--text-secondary,#888)' }}>AI föreslår artiklar utifrån ditt faktiska sortiment (produkttyper + kategorier). Klicka sedan "Generera artikel" så skrivs en färdig artikel i butikens ton och skapas som <b>utkast</b> i Shopify (internlänkar, FAQ/AEO, rätt SEO, inga tankstreck). Senare vässas urvalet av Search Console-data.</p>}
+
+        {articles && blogs && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 13 }}>
+            <span style={{ color: 'var(--text-secondary,#888)' }}>Publicera utkast till blogg:</span>
+            <select className="form-input" style={{ width: 220 }} value={blogId} onChange={e => setBlogId(e.target.value)}>
+              {blogs.map(b => <option key={b.id} value={b.id}>{b.title}</option>)}
+            </select>
+          </div>
+        )}
+
         {articles && articles.map((cl, ci) => (
           <div key={ci} style={{ marginBottom: 16 }}>
             <h4 style={{ margin: '8px 0', color: 'var(--accent)' }}>{cl.cluster}</h4>
             <div style={{ display: 'grid', gap: 8 }}>
-              {(cl.articles || []).map((a, ai) => (
-                <div key={ai} className="settings-section" style={{ padding: 12 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <strong style={{ fontSize: 14 }}>{a.title}</strong>
-                    <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 10, background: 'var(--bg-secondary,#222)', color: 'var(--text-secondary,#aaa)' }}>{a.type}</span>
-                  </div>
-                  {a.angle && <p style={{ fontSize: 12, color: 'var(--text-secondary,#888)', margin: '4px 0' }}>{a.angle}</p>}
-                  {a.keywords?.length > 0 && (
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
-                      {a.keywords.map((k, ki) => <span key={ki} style={{ fontSize: 11, color: 'var(--text-secondary,#888)' }}>#{k}</span>)}
+              {(cl.articles || []).map((a, ai) => {
+                const key = `${ci}-${ai}`;
+                const res = genResult[key];
+                return (
+                  <div key={ai} className="settings-section" style={{ padding: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <strong style={{ fontSize: 14 }}>{a.title}</strong>
+                      <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 10, background: 'var(--bg-secondary,#222)', color: 'var(--text-secondary,#aaa)' }}>{a.type}</span>
+                      <div style={{ marginLeft: 'auto' }}>
+                        {res ? (
+                          <a href={res.adminUrl} target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ textDecoration: 'none' }}>
+                            <CheckCircle2 size={14} /> Utkast skapat – öppna
+                          </a>
+                        ) : (
+                          <button className="btn btn-primary" onClick={() => generateArticle(key, a)} disabled={!!genBusy}>
+                            <Sparkles size={14} /> {genBusy === key ? 'Skriver…' : 'Generera artikel (draft)'}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </div>
-              ))}
+                    {a.angle && <p style={{ fontSize: 12, color: 'var(--text-secondary,#888)', margin: '4px 0' }}>{a.angle}</p>}
+                    {a.keywords?.length > 0 && (
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                        {a.keywords.map((k, ki) => <span key={ki} style={{ fontSize: 11, color: 'var(--text-secondary,#888)' }}>#{k}</span>)}
+                      </div>
+                    )}
+                    {res && <p style={{ fontSize: 12, color: '#22c55e', marginTop: 6 }}>Skapat som utkast i "{res.blog}" · {res.faq || 0} FAQ-frågor (AEO)</p>}
+                  </div>
+                );
+              })}
             </div>
           </div>
         ))}
