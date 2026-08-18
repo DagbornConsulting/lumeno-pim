@@ -1009,7 +1009,14 @@ export default function App() {
           )}
 
           {activeView === 'seo' && (
-            <SeoInsights />
+            <SeoInsights
+              onOpenProduct={async (id) => {
+                try {
+                  const r = await fetch(`${API_URL}/db/products/${id}`);
+                  if (r.ok) setSelectedProductForEdit(transformDbProduct(await r.json()));
+                } catch (_) { /* ignore */ }
+              }}
+            />
           )}
 
           {activeView === 'suppliers' && (

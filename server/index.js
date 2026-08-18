@@ -2999,6 +2999,151 @@ app.get('/api/seo/ga4/landing-pages', async (req, res) => {
 });
 
 // ============================================
+// SEO OPPORTUNITIES (catalog health + AI suggestions)
+// Works without Google: analyses the PIM catalogue for gaps and asks Claude for
+// topical-authority article ideas. Enriched later by GSC/GA4 data.
+// ============================================
+
+const CORE_ATTR_KEYS = ['custom.material', 'custom.fargnyans', 'custom.storlek', 'custom.kollektion'];
+const stripHtmlLen = (s) => String(s || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim().length;
+
+// Catalogue health: which live products lack category, attributes, description,
+// SEO fields or images. Returns counts + a capped item list per bucket.
+app.get('/api/seo/opportunities', async (req, res) => {
+  try {
+    const storeId = await resolveStoreId(req);
+    if (!storeId) return res.status(400).json({ error: 'Ingen butik' });
+    const { data } = await db.getProducts({ storeId, limit: 20000 });
+    const products = data || [];
+
+    const CAP = 300;
+    const buckets = {
+      missingCategory: [], thinAttributes: [], missingDescription: [],
+      missingSeoTitle: [], missingSeoDescription: [], noImages: [],
+    };
+    const slim = (p) => ({ id: p.id, title: p.title, sku: p.sku, product_type: p.product_type });
+
+    for (const p of products) {
+      const mfKeys = p.metafields && typeof p.metafields === 'object' ? Object.keys(p.metafields) : [];
+      const coreAttrs = mfKeys.filter(k => CORE_ATTR_KEYS.includes(k)).length;
+      if (!p.product_category) buckets.missingCategory.push(slim(p));
+      if (coreAttrs < 2) buckets.thinAttributes.push(slim(p));
+      if (stripHtmlLen(p.description) < 60) buckets.missingDescription.push(slim(p));
+      if (!p.seo_title) buckets.missingSeoTitle.push(slim(p));
+      if (!p.seo_description) buckets.missingSeoDescription.push(slim(p));
+      if (!(p.images?.length > 0)) buckets.noImages.push(slim(p));
+    }
+
+    const summarise = (arr) => ({ count: arr.length, items: arr.slice(0, CAP) });
+    res.json({
+      totalProducts: products.length,
+      buckets: {
+        missingCategory: summarise(buckets.missingCategory),
+        thinAttributes: summarise(buckets.thinAttributes),
+        missingDescription: summarise(buckets.missingDescription),
+        missingSeoTitle: summarise(buckets.missingSeoTitle),
+        missingSeoDescription: summarise(buckets.missingSeoDescription),
+        noImages: summarise(buckets.noImages),
+      },
+    });
+  } catch (e) {
+    console.error('SEO opportunities error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// AI article ideas for topical authority, derived from the catalogue's own
+// product types + categories (so the topics map to what the store actually sells).
+app.post('/api/seo/suggest-articles', async (req, res) => {
+  try {
+    if (!anthropic) return res.status(400).json({ error: 'API key not configured' });
+    const storeId = await resolveStoreId(req);
+    if (!storeId) return res.status(400).json({ error: 'Ingen butik' });
+    const { data } = await db.getProducts({ storeId, limit: 20000 });
+    const products = data || [];
+
+    // Aggregate the catalogue's shape: top product types + category leaves.
+    const typeCount = {}, catCount = {};
+    for (const p of products) {
+      if (p.product_type) typeCount[p.product_type] = (typeCount[p.product_type] || 0) + 1;
+      if (p.product_category) {
+        const leaf = String(p.product_category).split('>').pop().trim();
+        if (leaf) catCount[leaf] = (catCount[leaf] || 0) + 1;
+      }
+    }
+    const top = (obj, n) => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `${k} (${v})`);
+    const topTypes = top(typeCount, 30);
+    const topCats = top(catCount, 20);
+    const focus = String(req.body?.focus || '').trim();
+
+    const prompt = `Du är SEO- och content-strateg för en svensk e-handel som säljer heminredning (dropshipping). Målet är topical authority + AEO (svar som AI-motorer plockar upp).
+
+Butikens sortiment (produkttyper med antal):
+${topTypes.join(', ') || '(okänt)'}
+${topCats.length ? `\nVanliga kategorier: ${topCats.join(', ')}` : ''}
+${focus ? `\nExtra fokus: ${focus}` : ''}
+
+Föreslå 12 artiklar som bygger topical authority runt detta sortiment. Blanda: köpguider, "hur väljer man"-guider, stil-/inspirationsartiklar, skötselråd, säsong/högtid och FAQ-artiklar. Varje artikel ska kunna länka till relevanta produktkategorier internt.
+
+Svara ENBART med giltig JSON:
+{"clusters":[{"cluster":"temaområde","articles":[{"title":"...","type":"guide|inspiration|skötsel|säsong|FAQ|jämförelse","angle":"kort vinkel/varför den bygger auktoritet","keywords":["sökord","..."]}]}]}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 3000,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = response.content[0].text;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    let clusters = [];
+    if (jsonMatch) { try { clusters = JSON.parse(jsonMatch[0]).clusters || []; } catch { clusters = []; } }
+    res.json({ clusters, basedOn: { productTypes: topTypes.length, products: products.length } });
+  } catch (e) {
+    console.error('Suggest articles error:', e);
+    const msg = e.status === 529 ? 'Claude API är överbelastad. Försök igen.' : e.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
+// AI category paths for a batch of products (used to bulk-fill missing Shopify
+// categories). Returns an English taxonomy path per SKU; the client matches it
+// to the exact node id and applies it.
+app.post('/api/seo/suggest-categories', async (req, res) => {
+  try {
+    if (!anthropic) return res.status(400).json({ error: 'API key not configured' });
+    const { products } = req.body || {};
+    const MAX = 40;
+    if (!Array.isArray(products) || !products.length) return res.status(400).json({ error: 'products krävs' });
+    if (products.length > MAX) return res.status(413).json({ error: `Max ${MAX} produkter per anrop` });
+
+    const list = products.map((p, i) => `${i + 1}. SKU ${String(p.sku || '').trim()}: ${String(p.title || '').trim()}${p.product_type ? ` (typ: ${p.product_type})` : ''}`).join('\n');
+    const prompt = `Du klassificerar heminredningsprodukter mot Shopifys standardtaxonomi. För varje produkt, ge den mest passande kategorin som en ENGELSK taxonomisökväg, t.ex. "Home & Garden > Decor > Vases" eller "Home & Garden > Kitchen & Dining > Tableware > Dinnerware". Var så specifik som möjligt (använd lövnivån).
+
+Produkter:
+${list}
+
+Svara ENBART med giltig JSON i samma ordning:
+{"suggestions":[{"sku":"...","category":"Home & Garden > ..."}]}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = response.content[0].text;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    let suggestions = [];
+    if (jsonMatch) { try { suggestions = JSON.parse(jsonMatch[0]).suggestions || []; } catch { suggestions = []; } }
+    suggestions = suggestions.map(s => ({ sku: String(s.sku || '').trim(), category: String(s.category || '').trim() }));
+    res.json({ suggestions });
+  } catch (e) {
+    console.error('Suggest categories error:', e);
+    const msg = e.status === 529 ? 'Claude API är överbelastad. Försök igen.' : e.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
+// ============================================
 // IMAGE SYNC ENDPOINTS
 // ============================================
 

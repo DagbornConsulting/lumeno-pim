@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Search, TrendingUp, RefreshCw, CheckCircle2, AlertTriangle, Copy, ExternalLink } from 'lucide-react';
+import { Search, TrendingUp, RefreshCw, CheckCircle2, AlertTriangle, Copy, ExternalLink, Lightbulb, BarChart3 } from 'lucide-react';
+import Opportunities from './Opportunities';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
@@ -8,7 +9,8 @@ const num = (n) => (n == null ? '—' : Number(n).toLocaleString('sv-SE'));
 const pos = (n) => (n == null ? '—' : Number(n).toFixed(1));
 const dur = (s) => (s == null ? '—' : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`);
 
-export default function SeoInsights() {
+export default function SeoInsights({ onOpenProduct } = {}) {
+  const [tab, setTab] = useState('opportunities'); // 'opportunities' | 'analytics'
   const [status, setStatus] = useState(null);
   const [days, setDays] = useState(28);
   const [loading, setLoading] = useState(true);
@@ -78,21 +80,36 @@ export default function SeoInsights() {
       <div className="content-header">
         <div>
           <h1 className="content-title">SEO & Insikter</h1>
-          <p className="content-subtitle">Search Console + GA4 — se vad som presterar, vad som ska optimeras och vilka artiklar som bör skapas.</p>
+          <p className="content-subtitle">Möjligheter i katalogen + Search Console/GA4 — vad som ska optimeras och vilka artiklar som bör skapas.</p>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <select className="form-input" value={days} onChange={e => setDays(Number(e.target.value))} style={{ width: 130 }}>
-            <option value={7}>7 dagar</option>
-            <option value={28}>28 dagar</option>
-            <option value={90}>90 dagar</option>
-            <option value={180}>180 dagar</option>
-          </select>
-          <button className="btn btn-ghost" onClick={() => loadData()} disabled={loading}>
-            <RefreshCw size={16} className={loading ? 'spin' : ''} /> Uppdatera
-          </button>
-        </div>
+        {tab === 'analytics' && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <select className="form-input" value={days} onChange={e => setDays(Number(e.target.value))} style={{ width: 130 }}>
+              <option value={7}>7 dagar</option>
+              <option value={28}>28 dagar</option>
+              <option value={90}>90 dagar</option>
+              <option value={180}>180 dagar</option>
+            </select>
+            <button className="btn btn-ghost" onClick={() => loadData()} disabled={loading}>
+              <RefreshCw size={16} className={loading ? 'spin' : ''} /> Uppdatera
+            </button>
+          </div>
+        )}
       </div>
 
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <button className={`btn ${tab === 'opportunities' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setTab('opportunities')}>
+          <Lightbulb size={14} /> Möjligheter
+        </button>
+        <button className={`btn ${tab === 'analytics' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setTab('analytics')}>
+          <BarChart3 size={14} /> Search & Analytics
+        </button>
+      </div>
+
+      {tab === 'opportunities' && <Opportunities onOpenProduct={onOpenProduct} />}
+
+      {tab === 'analytics' && (<>
       {/* Connection / setup */}
       {status && !status.credentials && (
         <div className="settings-section" style={{ borderLeft: '3px solid #f59e0b' }}>
@@ -222,6 +239,7 @@ export default function SeoInsights() {
           </div>
         </div>
       )}
+      </>)}
     </div>
   );
 }
