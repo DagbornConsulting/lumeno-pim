@@ -2897,13 +2897,13 @@ async function seoConfig(req) {
   const storeId = await resolveStoreId(req);
   const store = storeId ? await db.getStoreById(storeId) : null;
   const g = store?.settings?.google || {};
-  return { storeId, store, siteUrl: g.gsc_site_url || null, propertyId: g.ga4_property_id || null };
+  return { storeId, store, siteUrl: g.gsc_site_url || null, propertyId: g.ga4_property_id || null, merchantId: g.merchant_id || null };
 }
 
 // Connection status: is the service account present + what is configured.
 app.get('/api/seo/status', async (req, res) => {
   try {
-    const { store, siteUrl, propertyId } = await seoConfig(req);
+    const { store, siteUrl, propertyId, merchantId } = await seoConfig(req);
     let email = null;
     try { email = googleSeo.getServiceAccount()?.client_email || null; } catch (_) {}
     res.json({
@@ -2911,6 +2911,7 @@ app.get('/api/seo/status', async (req, res) => {
       serviceAccountEmail: email,
       gscSiteUrl: siteUrl,
       ga4PropertyId: propertyId,
+      merchantId: merchantId,
       storeConnected: !!store,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2922,11 +2923,12 @@ app.post('/api/seo/config', async (req, res) => {
     const storeId = await resolveStoreId(req);
     if (!storeId) return res.status(400).json({ error: 'Ingen butik' });
     const store = await db.getStoreById(storeId);
-    const { gscSiteUrl, ga4PropertyId } = req.body || {};
+    const { gscSiteUrl, ga4PropertyId, merchantId } = req.body || {};
     const google = {
       ...(store.settings?.google || {}),
       ...(gscSiteUrl !== undefined ? { gsc_site_url: gscSiteUrl || null } : {}),
       ...(ga4PropertyId !== undefined ? { ga4_property_id: ga4PropertyId || null } : {}),
+      ...(merchantId !== undefined ? { merchant_id: merchantId || null } : {}),
     };
     const { error } = await supabase.from('stores')
       .update({ settings: { ...(store.settings || {}), google } }).eq('id', storeId);
@@ -2939,6 +2941,56 @@ app.post('/api/seo/config', async (req, res) => {
 app.get('/api/seo/gsc/sites', async (req, res) => {
   try { res.json({ sites: await googleSeo.gscListSites() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Merchant Center: account-level issues + product feed problems, grouped by
+// issue type so they read as an actionable to-fix list.
+app.get('/api/seo/merchant/issues', async (req, res) => {
+  try {
+    const { merchantId } = await seoConfig(req);
+    if (!merchantId) return res.status(400).json({ error: 'Merchant Center account-id ej konfigurerat' });
+
+    const [account, productStatuses] = await Promise.all([
+      googleSeo.merchantAccountStatus({ merchantId }).catch(e => ({ error: e.message })),
+      googleSeo.merchantProductStatuses({ merchantId }),
+    ]);
+
+    // Group product issues by code, keep severity + a few affected samples.
+    const byCode = new Map();
+    let withIssues = 0, disapproved = 0;
+    for (const p of productStatuses) {
+      if (p.issues.length) withIssues++;
+      if (p.issues.some(i => i.servability === 'disapproved')) disapproved++;
+      for (const i of p.issues) {
+        if (!byCode.has(i.code)) {
+          byCode.set(i.code, {
+            code: i.code, description: i.description, servability: i.servability,
+            resolution: i.resolution, documentation: i.documentation,
+            attributeName: i.attributeName, count: 0, samples: [],
+          });
+        }
+        const g = byCode.get(i.code);
+        g.count++;
+        if (g.samples.length < 8) g.samples.push({ productId: p.productId, title: p.title, link: p.link });
+      }
+    }
+    const groups = [...byCode.values()].sort((a, b) => {
+      const rank = s => (s === 'disapproved' ? 0 : s === 'demoted' ? 1 : 2);
+      return rank(a.servability) - rank(b.servability) || b.count - a.count;
+    });
+
+    res.json({
+      account: account?.error ? { error: account.error } : {
+        accountId: account.accountId,
+        websiteClaimed: account.websiteClaimed,
+        accountLevelIssues: account.accountLevelIssues,
+      },
+      products: { total: productStatuses.length, withIssues, disapproved, byIssue: groups },
+    });
+  } catch (e) {
+    console.error('Merchant issues error:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Top search queries (clicks/impressions/ctr/position).

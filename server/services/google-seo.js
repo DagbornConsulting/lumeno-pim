@@ -19,6 +19,7 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPES = [
   'https://www.googleapis.com/auth/webmasters.readonly',
   'https://www.googleapis.com/auth/analytics.readonly',
+  'https://www.googleapis.com/auth/content', // Merchant Center (Content API for Shopping)
 ].join(' ');
 
 let _tokenCache = null; // { token, exp }
@@ -163,4 +164,62 @@ export async function ga4RunReport({ propertyId, startDate, endDate, dimensions 
     return out;
   });
   return { rows, dimensionHeaders: dimHeaders, metricHeaders: metHeaders, totalRows: data.rowCount || rows.length };
+}
+
+// --- Merchant Center (Content API for Shopping v2.1) --------------------
+
+const CONTENT_BASE = 'https://shoppingcontent.googleapis.com/content/v2.1';
+
+// Account-level status: is the account suspended, plus account-wide issues.
+export async function merchantAccountStatus({ merchantId }) {
+  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+  const token = await getAccessToken();
+  const id = String(merchantId).replace(/[^0-9]/g, '');
+  const res = await fetch(`${CONTENT_BASE}/${id}/accountstatuses/${id}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Merchant-fel: ${data.error?.message || res.status}`);
+  return {
+    accountId: data.accountId,
+    websiteClaimed: data.websiteClaimed,
+    accountLevelIssues: (data.accountLevelIssues || []).map(i => ({
+      id: i.id, title: i.title, country: i.country, severity: i.severity,
+      detail: i.detail, documentation: i.documentation,
+    })),
+    products: data.products || [],
+  };
+}
+
+// Per-product status incl. itemLevelIssues (disapprovals, GTIN, image, price…).
+// Paginates; returns a flat list of products with their issues.
+export async function merchantProductStatuses({ merchantId, maxPages = 20 }) {
+  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+  const token = await getAccessToken();
+  const id = String(merchantId).replace(/[^0-9]/g, '');
+  const out = [];
+  let pageToken = null, pages = 0;
+  do {
+    const url = new URL(`${CONTENT_BASE}/${id}/productstatuses`);
+    url.searchParams.set('maxResults', '250');
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`Merchant-fel: ${data.error?.message || res.status}`);
+    for (const p of data.resources || []) {
+      out.push({
+        productId: p.productId,
+        title: p.title,
+        link: p.link,
+        issues: (p.itemLevelIssues || []).map(i => ({
+          code: i.code, servability: i.servability, resolution: i.resolution,
+          attributeName: i.attributeName, description: i.description, detail: i.detail,
+          documentation: i.documentation,
+        })),
+      });
+    }
+    pageToken = data.nextPageToken || null;
+    pages++;
+  } while (pageToken && pages < maxPages);
+  return out;
 }

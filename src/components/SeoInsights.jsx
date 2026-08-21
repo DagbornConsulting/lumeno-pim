@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Search, TrendingUp, RefreshCw, CheckCircle2, AlertTriangle, Copy, ExternalLink, Lightbulb, BarChart3 } from 'lucide-react';
+import { Search, TrendingUp, RefreshCw, CheckCircle2, AlertTriangle, Copy, ExternalLink, Lightbulb, BarChart3, ShoppingCart } from 'lucide-react';
 import Opportunities from './Opportunities';
+import MerchantIssues from './MerchantIssues';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
@@ -105,9 +106,13 @@ export default function SeoInsights({ onOpenProduct } = {}) {
         <button className={`btn ${tab === 'analytics' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setTab('analytics')}>
           <BarChart3 size={14} /> Search & Analytics
         </button>
+        <button className={`btn ${tab === 'merchant' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setTab('merchant')}>
+          <ShoppingCart size={14} /> Merchant Center
+        </button>
       </div>
 
       {tab === 'opportunities' && <Opportunities onOpenProduct={onOpenProduct} />}
+      {tab === 'merchant' && <MerchantIssues />}
 
       {tab === 'analytics' && (<>
       {/* Connection / setup */}
