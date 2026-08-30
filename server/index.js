@@ -526,6 +526,7 @@ const publicExactPaths = new Set([
   '/api/auth/verify',   // validates its own bearer token internally
   '/api/auth/logout',
   '/api/price-watch/cron', // Vercel Cron — authenticates with CRON_SECRET, not a session
+  '/api/cron/shopify-pull', // Vercel Cron — same secret
 ]);
 // Public path prefixes — Shopify OAuth/webhooks send no session header.
 const publicPrefixes = [
@@ -3067,13 +3068,35 @@ app.get('/api/price-watch/register-gcp', async (req, res) => {
 // Daily fetch on serverless hosts (Vercel Cron, see vercel.json "crons").
 // Vercel sends "Authorization: Bearer <CRON_SECRET>" when the CRON_SECRET env
 // var is set on the project. No session — guarded by the secret only.
-app.get('/api/price-watch/cron', async (req, res) => {
+const cronAuthorized = (req) => {
   const secret = process.env.CRON_SECRET || '';
   const auth = String(req.headers.authorization || '');
   const provided = auth.startsWith('Bearer ') ? auth.slice(7) : String(req.query.secret || '');
-  const ok = secret.length > 0 && provided.length === secret.length
+  return secret.length > 0 && provided.length === secret.length
     && crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(secret));
-  if (!ok) return res.status(401).json({ error: 'Unauthorized' });
+};
+
+// Daily Shopify → PIM pull for serverless hosts (the SHOPIFY_PULL_MINUTES
+// poll never fires on Vercel). Imports new Shopify products into staging,
+// pulls content changes and collections. Pull-only: never writes to Shopify.
+app.get('/api/cron/shopify-pull', async (req, res) => {
+  if (!cronAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isDbConfigured()) return res.status(503).json({ error: 'Databas ej konfigurerad' });
+  const results = [];
+  for (const store of (await db.getStores()) || []) {
+    if (!store.access_token) continue;
+    const r = { store: store.name };
+    try { r.newProducts = await importNewProductsFromShopify(store); } catch (e) { r.newProductsError = e.message; }
+    try { r.pull = await pullAllFromShopify(store); } catch (e) { r.pullError = e.message; }
+    try { r.collections = await pullCollectionsFromShopify(store); } catch (e) { r.collectionsError = e.message; }
+    console.log(`🔄 Cron Shopify→PIM ${store.name}:`, JSON.stringify(r));
+    results.push(r);
+  }
+  res.json({ ok: true, results });
+});
+
+app.get('/api/price-watch/cron', async (req, res) => {
+  if (!cronAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
   if (!isDbConfigured()) return res.status(503).json({ error: 'Databas ej konfigurerad' });
   if (!googleSeo.isConfigured()) return res.status(400).json({ error: 'Google service-account saknas' });
   const results = [];
@@ -3223,46 +3246,110 @@ const CORE_ATTR_KEYS = ['custom.material', 'custom.fargnyans', 'custom.storlek',
 const stripHtmlLen = (s) => String(s || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim().length;
 
 // Catalogue health: which live products lack category, attributes, description,
-// SEO fields or images. Returns counts + a capped item list per bucket.
+// SEO fields or images. Shared by the SEO tab and the dashboard.
+const computeCatalogueHealth = (products, cap = 300) => {
+  const buckets = {
+    missingCategory: [], thinAttributes: [], missingDescription: [],
+    missingSeoTitle: [], missingSeoDescription: [], noImages: [],
+  };
+  const slim = (p) => ({ id: p.id, title: p.title, sku: p.sku, product_type: p.product_type });
+  for (const p of products) {
+    const mfKeys = p.metafields && typeof p.metafields === 'object' ? Object.keys(p.metafields) : [];
+    const coreAttrs = mfKeys.filter(k => CORE_ATTR_KEYS.includes(k)).length;
+    if (!p.product_category) buckets.missingCategory.push(slim(p));
+    if (coreAttrs < 2) buckets.thinAttributes.push(slim(p));
+    if (stripHtmlLen(p.description) < 60) buckets.missingDescription.push(slim(p));
+    if (!p.seo_title) buckets.missingSeoTitle.push(slim(p));
+    if (!p.seo_description) buckets.missingSeoDescription.push(slim(p));
+    if (!(p.images?.length > 0)) buckets.noImages.push(slim(p));
+  }
+  const summarise = (arr) => ({ count: arr.length, items: arr.slice(0, cap) });
+  return {
+    totalProducts: products.length,
+    buckets: Object.fromEntries(Object.entries(buckets).map(([k, v]) => [k, summarise(v)])),
+  };
+};
+
 app.get('/api/seo/opportunities', async (req, res) => {
   try {
     const storeId = await resolveStoreId(req);
     if (!storeId) return res.status(400).json({ error: 'Ingen butik' });
     const { data } = await db.getProducts({ storeId, limit: 20000 });
-    const products = data || [];
+    res.json(computeCatalogueHealth(data || []));
+  } catch (e) {
+    console.error('SEO opportunities error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    const CAP = 300;
-    const buckets = {
-      missingCategory: [], thinAttributes: [], missingDescription: [],
-      missingSeoTitle: [], missingSeoDescription: [], noImages: [],
-    };
-    const slim = (p) => ({ id: p.id, title: p.title, sku: p.sku, product_type: p.product_type });
+// ============================================
+// DASHBOARD ("kontrollrum") — one call that gathers what needs attention.
+// Read-only. Every block is fetched independently so one failure doesn't
+// blank the page.
+// ============================================
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const storeId = store.id;
+    const safe = (p) => p.catch(e => ({ error: e.message }));
+    const countWhere = (table, apply) => safe((async () => {
+      const { count, error } = await apply(supabase.from(table).select('*', { count: 'exact', head: true }));
+      if (error) throw error;
+      return count || 0;
+    })());
 
-    for (const p of products) {
-      const mfKeys = p.metafields && typeof p.metafields === 'object' ? Object.keys(p.metafields) : [];
-      const coreAttrs = mfKeys.filter(k => CORE_ATTR_KEYS.includes(k)).length;
-      if (!p.product_category) buckets.missingCategory.push(slim(p));
-      if (coreAttrs < 2) buckets.thinAttributes.push(slim(p));
-      if (stripHtmlLen(p.description) < 60) buckets.missingDescription.push(slim(p));
-      if (!p.seo_title) buckets.missingSeoTitle.push(slim(p));
-      if (!p.seo_description) buckets.missingSeoDescription.push(slim(p));
-      if (!(p.images?.length > 0)) buckets.noImages.push(slim(p));
-    }
+    const [pw, openItems, underFloor, unmatched, health, active, draft, staged, syncErrorCount, queuePending, activity] = await Promise.all([
+      safe(priceWatch.summary(storeId)),
+      safe(priceWatch.listItems({ storeId, open: true, limit: 400 })),
+      safe(priceWatch.underFloor({ storeId, limit: 8 })),
+      countWhere('price_benchmarks', q => q.eq('store_id', storeId).is('product_id', null)),
+      safe(db.getProducts({ storeId, limit: 20000 }).then(r => computeCatalogueHealth(r.data || [], 0))),
+      countWhere('products', q => q.eq('store_id', storeId).eq('status', 'active').or('is_staged.is.null,is_staged.eq.false')),
+      countWhere('products', q => q.eq('store_id', storeId).eq('status', 'draft').or('is_staged.is.null,is_staged.eq.false')),
+      countWhere('products', q => q.eq('store_id', storeId).eq('is_staged', true)),
+      countWhere('store_products', q => q.eq('store_id', storeId).eq('sync_status', 'error')),
+      countWhere('sync_queue', q => q.eq('store_id', storeId).in('status', ['pending', 'processing'])),
+      safe((async () => {
+        const { data, error } = await supabase.from('activity_log').select('action, entity_type, entity_id, description, created_at')
+          .or(`store_id.eq.${storeId},store_id.is.null`).order('created_at', { ascending: false }).limit(8);
+        if (error) throw error;
+        return data || [];
+      })()),
+    ]);
 
-    const summarise = (arr) => ({ count: arr.length, items: arr.slice(0, CAP) });
+    const g = store.settings?.google || {};
     res.json({
-      totalProducts: products.length,
-      buckets: {
-        missingCategory: summarise(buckets.missingCategory),
-        thinAttributes: summarise(buckets.thinAttributes),
-        missingDescription: summarise(buckets.missingDescription),
-        missingSeoTitle: summarise(buckets.missingSeoTitle),
-        missingSeoDescription: summarise(buckets.missingSeoDescription),
-        noImages: summarise(buckets.noImages),
+      store: { name: store.name, domain: store.custom_domain || store.domain },
+      priceWatch: {
+        ...(pw.error ? { error: pw.error } : pw),
+        topOpen: Array.isArray(openItems) ? openItems.slice(0, 6) : [],
+        underFloor: Array.isArray(underFloor) ? underFloor : [],
+        unmatched: typeof unmatched === 'number' ? unmatched : 0,
+      },
+      catalogue: {
+        active: typeof active === 'number' ? active : null,
+        draft: typeof draft === 'number' ? draft : null,
+        staged: typeof staged === 'number' ? staged : null,
+        health: health?.error ? { error: health.error } : health,
+      },
+      sync: {
+        errors: typeof syncErrorCount === 'number' ? syncErrorCount : null,
+        queued: typeof queuePending === 'number' ? queuePending : null,
+      },
+      activity: Array.isArray(activity) ? activity : [],
+      connections: {
+        shopify: !!store.access_token,
+        googleServiceAccount: googleSeo.isConfigured(),
+        merchantCenter: !!g.merchant_id,
+        searchConsole: !!g.gsc_site_url,
+        ga4: !!g.ga4_property_id,
+        cronSecret: !!process.env.CRON_SECRET,
+        anthropic: !!process.env.ANTHROPIC_API_KEY,
+        serverless: !!process.env.VERCEL,
       },
     });
   } catch (e) {
-    console.error('SEO opportunities error:', e);
+    console.error('Dashboard error:', e);
     res.status(500).json({ error: e.message });
   }
 });

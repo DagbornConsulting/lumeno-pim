@@ -8,6 +8,7 @@
     }
   },
   "crons": [
+    { "path": "/api/cron/shopify-pull", "schedule": "0 3 * * *" },
     { "path": "/api/price-watch/cron", "schedule": "0 4 * * *" }
   ],
   "rewrites": [

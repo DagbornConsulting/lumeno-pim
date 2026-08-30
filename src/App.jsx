@@ -6,7 +6,7 @@ import {
   Zap, Database, RefreshCw, PanelRightOpen, PanelRightClose,
   Globe, Tag, Layers, Box, ShoppingBag, Shirt, CircleDot,
   CheckCircle2, AlertCircle, FileText, Wand2, Loader2, LogOut,
-  Users, FolderInput, TrendingUp, Scale
+  Users, FolderInput, TrendingUp, Scale, LayoutDashboard
 } from 'lucide-react';
 import Login from './components/Login';
 import './components/Login.css';
@@ -21,6 +21,7 @@ import InventorySync from './components/InventorySync';
 import StagingProducts from './components/StagingProducts';
 import SeoInsights from './components/SeoInsights';
 import PriceWatch from './components/PriceWatch';
+import Dashboard from './components/Dashboard';
 import ShopifyImport from './components/ShopifyImport';
 import { transformDbProduct } from './lib/transformProduct';
 import StoreManager from './components/StoreManager';
@@ -45,7 +46,7 @@ export default function App() {
     } catch { return null; }
   });
 
-  const [activeView, setActiveView] = useState('products');
+  const [activeView, setActiveView] = useState('dashboard');
   const [products, setProducts] = useState([]);
   const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -771,6 +772,16 @@ export default function App() {
         </div>
         
         <nav className="nav-section">
+          <div
+            className={`nav-item ${activeView === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveView('dashboard')}
+          >
+            <LayoutDashboard size={20} />
+            <span className="nav-label">Översikt</span>
+          </div>
+        </nav>
+
+        <nav className="nav-section">
           <div className="nav-section-title">Produkter</div>
           <div
             className={`nav-item ${activeView === 'products' ? 'active' : ''}`}
@@ -988,6 +999,18 @@ export default function App() {
 
           {activeView === 'margin' && (
             <MarginEngine />
+          )}
+
+          {activeView === 'dashboard' && (
+            <Dashboard
+              onNavigate={setActiveView}
+              onOpenProduct={async (id) => {
+                try {
+                  const r = await fetch(`${API_URL}/db/products/${id}`);
+                  if (r.ok) setSelectedProductForEdit(transformDbProduct(await r.json()));
+                } catch (_) { /* ignore */ }
+              }}
+            />
           )}
 
           {activeView === 'price-watch' && (

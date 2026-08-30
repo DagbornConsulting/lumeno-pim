@@ -1,0 +1,91 @@
+/* Översikt / kontrollrum */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+}
+.dash-card {
+  background: var(--surface, var(--bg-alt));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.dash-span-3 { grid-column: span 3; }
+.dash-span-4 { grid-column: span 4; }
+.dash-span-6 { grid-column: span 6; }
+.dash-span-8 { grid-column: span 8; }
+.dash-span-12 { grid-column: span 12; }
+@media (max-width: 1200px) {
+  .dash-span-3 { grid-column: span 6; }
+  .dash-span-4 { grid-column: span 6; }
+  .dash-span-8 { grid-column: span 12; }
+}
+@media (max-width: 800px) {
+  .dash-span-3, .dash-span-4, .dash-span-6 { grid-column: span 12; }
+}
+
+.dash-card-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+  font-size: 13px; font-weight: 600;
+}
+.dash-card-head .spacer { flex: 1; }
+.dash-card-head .dash-link {
+  font-size: 12px; font-weight: 500; color: var(--text-secondary, var(--fg-muted));
+  background: none; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 0;
+}
+.dash-card-head .dash-link:hover { color: var(--fg); text-decoration: underline; }
+
+/* Attention tiles */
+.dash-tile { cursor: pointer; transition: transform .08s ease, box-shadow .08s ease; }
+.dash-tile:hover { transform: translateY(-1px); box-shadow: var(--shadow, 0 2px 8px rgba(0,0,0,.08)); }
+.dash-tile-value { font-size: 30px; font-weight: 700; line-height: 1.1; margin: 4px 0 2px; }
+.dash-tile-label { font-size: 12px; color: var(--text-secondary, var(--fg-muted)); display: flex; align-items: center; gap: 6px; }
+.dash-tile-sub { font-size: 11px; color: var(--text-secondary, var(--fg-muted)); }
+.dash-tile.tone-red { border-left: 3px solid #b83a3a; }
+.dash-tile.tone-amber { border-left: 3px solid #c98a16; }
+.dash-tile.tone-blue { border-left: 3px solid #2a6fb0; }
+.dash-tile.tone-green { border-left: 3px solid #2f8f55; }
+.dash-tile.tone-grey { border-left: 3px solid #cdc6bc; }
+.dash-tile .tone-red { color: #b83a3a; }
+.dash-tile .tone-amber { color: #c98a16; }
+.dash-tile .tone-blue { color: #2a6fb0; }
+.dash-tile .tone-green { color: #2f8f55; }
+
+/* Lists inside cards */
+.dash-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.dash-list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 0; border-top: 1px solid var(--border);
+}
+.dash-list li:first-child { border-top: none; }
+.dash-list .grow { flex: 1; min-width: 0; }
+.dash-list .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.dash-list .sub { font-size: 11px; color: var(--text-secondary, var(--fg-muted)); }
+.dash-list .num { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.dash-list li.clickable { cursor: pointer; }
+.dash-list li.clickable:hover .title { text-decoration: underline; }
+.dash-empty { font-size: 13px; color: var(--text-secondary, var(--fg-muted)); padding: 12px 0; display: flex; align-items: center; gap: 6px; }
+
+/* Status mini stats row */
+.dash-stats { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; font-size: 12px; }
+.dash-stats span { display: inline-flex; align-items: center; gap: 5px; }
+.dash-stats b { font-size: 14px; }
+
+/* Health bars */
+.dash-bar { display: flex; align-items: center; gap: 10px; font-size: 12px; padding: 5px 0; cursor: pointer; }
+.dash-bar .lbl { width: 170px; flex-shrink: 0; }
+.dash-bar .track { flex: 1; height: 8px; background: var(--bg-sunken, #f0ede8); border-radius: 4px; overflow: hidden; }
+.dash-bar .fill { height: 100%; border-radius: 4px; }
+.dash-bar .val { width: 70px; text-align: right; font-variant-numeric: tabular-nums; }
+.dash-bar:hover .lbl { text-decoration: underline; }
+
+/* Connections */
+.dash-conn { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px 14px; font-size: 13px; }
+.dash-conn span { display: inline-flex; align-items: center; gap: 6px; }
+.dash-conn .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dash-conn .ok { background: #2f8f55; }
+.dash-conn .missing { background: #b83a3a; }
+.dash-conn .off { background: #cdc6bc; }

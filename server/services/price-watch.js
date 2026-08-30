@@ -292,6 +292,19 @@ export async function listItems({ storeId, status, open, q, sort = 'impact', lim
   return rows;
 }
 
+// Offers whose live price is below the computed floor price (we lose margin
+// regardless of what the market does). Sorted by how far below.
+export async function underFloor({ storeId, limit = 20 }) {
+  const { data, error } = await supabase.from('price_benchmarks')
+    .select('id, offer_id, sku, title, our_price, benchmark_price, floor_price, cost_price, pack_qty, price_status, product_id')
+    .eq('store_id', storeId).not('floor_price', 'is', null).limit(5000);
+  if (error) throw new Error(error.message);
+  return (data || [])
+    .filter(r => num(r.our_price) != null && num(r.our_price) < num(r.floor_price))
+    .sort((a, b) => (num(b.floor_price) - num(b.our_price)) - (num(a.floor_price) - num(a.our_price)))
+    .slice(0, limit);
+}
+
 export async function summary(storeId) {
   const empty = { total: 0, withBenchmark: 0, coverage: 0, byStatus: {}, open: {}, acknowledged: 0, lastRun: null, packProducts: 0 };
   if (!supabase) return empty;
