@@ -4,9 +4,12 @@
   "framework": "vite",
   "functions": {
     "api/[...slug].js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   },
+  "crons": [
+    { "path": "/api/price-watch/cron", "schedule": "0 4 * * *" }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/[...slug]" },
     { "source": "/((?!api/).*)", "destination": "/" }

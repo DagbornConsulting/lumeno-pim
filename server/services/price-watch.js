@@ -240,15 +240,19 @@ export async function runFetch({ store, trigger = 'manual' }) {
       history.push({ store_id: store.id, offer_id: row.offer_id, day, our_price: row.our_price, benchmark_price: row.benchmark_price, price_index: row.price_index, price_status: row.price_status });
     }
 
+    // Chunked + parallel writes: keeps the run well inside serverless time limits.
     const CHUNK = 400;
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const { error } = await supabase.from('price_benchmarks').upsert(rows.slice(i, i + CHUNK), { onConflict: 'store_id,offer_id' });
-      if (error) throw new Error(`price_benchmarks: ${error.message}`);
-    }
-    for (let i = 0; i < history.length; i += CHUNK) {
-      const { error } = await supabase.from('price_benchmark_history').upsert(history.slice(i, i + CHUNK), { onConflict: 'store_id,offer_id,day' });
-      if (error) throw new Error(`price_benchmark_history: ${error.message}`);
-    }
+    const chunks = (arr) => Array.from({ length: Math.ceil(arr.length / CHUNK) }, (_, i) => arr.slice(i * CHUNK, (i + 1) * CHUNK));
+    await Promise.all([
+      ...chunks(rows).map(async part => {
+        const { error } = await supabase.from('price_benchmarks').upsert(part, { onConflict: 'store_id,offer_id' });
+        if (error) throw new Error(`price_benchmarks: ${error.message}`);
+      }),
+      ...chunks(history).map(async part => {
+        const { error } = await supabase.from('price_benchmark_history').upsert(part, { onConflict: 'store_id,offer_id,day' });
+        if (error) throw new Error(`price_benchmark_history: ${error.message}`);
+      }),
+    ]);
 
     const summary = { offers: offers.length, withBenchmark, matched, reopened, coverage: offers.length ? round3(withBenchmark / offers.length) : 0 };
     await supabase.from('price_watch_runs').update({

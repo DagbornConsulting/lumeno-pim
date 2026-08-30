@@ -525,6 +525,7 @@ const publicExactPaths = new Set([
   '/api/auth/login',
   '/api/auth/verify',   // validates its own bearer token internally
   '/api/auth/logout',
+  '/api/price-watch/cron', // Vercel Cron — authenticates with CRON_SECRET, not a session
 ]);
 // Public path prefixes — Shopify OAuth/webhooks send no session header.
 const publicPrefixes = [
@@ -3038,6 +3039,27 @@ app.post('/api/price-watch/config', async (req, res) => {
     if (error) throw error;
     res.json({ ok: true, merchantId: next.google?.merchant_id || null, settings: priceWatch.getSettings({ settings: next }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Daily fetch on serverless hosts (Vercel Cron, see vercel.json "crons").
+// Vercel sends "Authorization: Bearer <CRON_SECRET>" when the CRON_SECRET env
+// var is set on the project. No session — guarded by the secret only.
+app.get('/api/price-watch/cron', async (req, res) => {
+  const secret = process.env.CRON_SECRET || '';
+  const auth = String(req.headers.authorization || '');
+  const provided = auth.startsWith('Bearer ') ? auth.slice(7) : String(req.query.secret || '');
+  const ok = secret.length > 0 && provided.length === secret.length
+    && crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(secret));
+  if (!ok) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isDbConfigured()) return res.status(503).json({ error: 'Databas ej konfigurerad' });
+  if (!googleSeo.isConfigured()) return res.status(400).json({ error: 'Google service-account saknas' });
+  const results = [];
+  for (const store of (await db.getStores()) || []) {
+    if (!store.settings?.google?.merchant_id) continue;
+    try { results.push({ store: store.name, ...(await priceWatch.runFetch({ store, trigger: 'scheduled' })) }); }
+    catch (e) { console.error(`Prisbevakning (cron) misslyckades för ${store.name}:`, e.message); results.push({ store: store.name, error: e.message }); }
+  }
+  res.json({ ok: true, results });
 });
 
 // Fetch benchmarks now (same job as the nightly run).
@@ -5814,7 +5836,9 @@ if (PULL_MINUTES > 0 && isDbConfigured()) {
 // Nightly price-watch fetch (Merchant Center benchmark → price_benchmarks).
 // Runs once per day at PRICE_WATCH_HOUR (server local time, default 04) on a
 // persistent host. PRICE_WATCH_HOUR=off disables. Never writes to Shopify.
-if (PRICE_WATCH_HOUR != null && isDbConfigured()) {
+// On Vercel (serverless) timers don't survive — the Vercel Cron in vercel.json
+// calls /api/price-watch/cron instead.
+if (PRICE_WATCH_HOUR != null && isDbConfigured() && !process.env.VERCEL) {
   let pwLastDay = null;
   let pwRunning = false;
   const priceWatchTick = async () => {
