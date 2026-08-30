@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard, Scale, TrendingDown, AlertTriangle, CheckCircle2, RefreshCw,
   ArrowRight, Package, PackagePlus, Link2, Activity, Search, FolderInput, Zap,
+  ShoppingBag, Globe, Upload, Truck, Loader2,
 } from 'lucide-react';
 import './Dashboard.css';
 import './PriceWatch.css';
@@ -9,7 +10,7 @@ import './PriceWatch.css';
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 const kr = v => (v == null ? '–' : `${Number(v).toLocaleString('sv-SE', { maximumFractionDigits: 0 })} kr`);
-const pct = v => (v == null ? '–' : `${Math.round(Number(v) * 100)} %`);
+const n = v => (v == null ? '–' : Number(v).toLocaleString('sv-SE'));
 const ago = (v) => {
   if (!v) return 'aldrig';
   const m = Math.round((Date.now() - new Date(v).getTime()) / 60000);
@@ -18,6 +19,13 @@ const ago = (v) => {
   const h = Math.round(m / 60);
   if (h < 36) return `${h} tim sedan`;
   return `${Math.round(h / 24)} dagar sedan`;
+};
+// Change vs previous period, as a coloured "+12 %" / "−4 %".
+const Delta = ({ cur, prev }) => {
+  if (!prev) return <span className="sub">—</span>;
+  const d = (cur - prev) / prev;
+  const col = d > 0.02 ? '#2f8f55' : d < -0.02 ? '#b83a3a' : 'inherit';
+  return <span style={{ color: col, fontSize: 12 }}>{d >= 0 ? '+' : '−'}{Math.abs(Math.round(d * 100))} %</span>;
 };
 
 const HEALTH = [
@@ -39,12 +47,29 @@ const CONNECTIONS = [
   { key: 'anthropic', label: 'Claude AI', optional: true },
 ];
 
-function Card({ title, icon: Icon, span = 4, linkLabel, onLink, children }) {
+// Small fetch hook for the lazily loaded cards (external APIs).
+function useLazy(path, deps = []) {
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+  const load = useCallback(async (refresh = false) => {
+    setState(s => ({ ...s, loading: true, error: null }));
+    try {
+      const r = await fetch(`${API_URL}${path}${refresh ? (path.includes('?') ? '&' : '?') + 'refresh=1' : ''}`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Fel');
+      setState({ loading: false, data: d, error: null });
+    } catch (e) { setState({ loading: false, data: null, error: e.message }); }
+  }, [path]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [load, ...deps]); // eslint-disable-line react-hooks/exhaustive-deps
+  return [state, load];
+}
+
+function Card({ title, icon: Icon, span = 4, linkLabel, onLink, right, children }) {
   return (
     <div className={`dash-card dash-span-${span}`}>
       <div className="dash-card-head">
         {Icon && <Icon size={15} />} {title}
         <span className="spacer" />
+        {right}
         {onLink && <button className="dash-link" onClick={onLink}>{linkLabel || 'Öppna'} <ArrowRight size={12} /></button>}
       </div>
       {children}
@@ -62,6 +87,175 @@ function Tile({ value, label, sub, tone = 'grey', icon: Icon, onClick }) {
   );
 }
 
+const Spinner = ({ text = 'Hämtar…' }) => <div className="dash-empty"><Loader2 size={14} className="spin" /> {text}</div>;
+const Err = ({ text }) => <div className="dash-empty"><AlertTriangle size={14} color="#b83a3a" /> {text}</div>;
+
+// --- Sales (Shopify orders) -----------------------------------------------
+function SalesCard({ onNavigate }) {
+  const [{ loading, data, error }, reload] = useLazy('/dashboard/sales');
+  return (
+    <Card title="Försäljning (Shopify)" icon={ShoppingBag} span={6}
+      right={<button className="dash-link" onClick={() => reload(true)} title="Hämta igen"><RefreshCw size={12} className={loading ? 'spin' : ''} /></button>}>
+      {loading && !data ? <Spinner text="Hämtar ordrar…" /> : error ? <Err text={error} /> : data && (
+        <>
+          <div className="dash-stats">
+            <span><b>{kr(data.revenue7)}</b> 7 dagar <span className="sub">({data.orders7} ordrar)</span></span>
+            <span><b>{kr(data.revenue30)}</b> 30 dagar <span className="sub">({data.orders30} ordrar · {data.units30} enheter)</span></span>
+            <span>snittorder <b>{kr(data.avgOrder30)}</b></span>
+          </div>
+          {data.top?.length ? (
+            <ul className="dash-list">
+              {data.top.slice(0, 6).map(r => (
+                <li key={r.sku}>
+                  <span className="grow"><span className="title">{r.title}</span><span className="sub">{r.sku}</span></span>
+                  <span className="num">{r.units} st<br /><span className="sub">{kr(r.revenue)}</span></span>
+                </li>
+              ))}
+            </ul>
+          ) : <div className="dash-empty">Inga ordrar de senaste 30 dagarna.</div>}
+          <div className="dash-tile-sub" style={{ marginTop: 8 }}>Sålda enheter per produkt används för att sortera prisvarningarna efter påverkan.</div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+// --- Merchant Center -----------------------------------------------------
+function MerchantCard({ onNavigate }) {
+  const [{ loading, data, error }, reload] = useLazy('/dashboard/merchant');
+  const sev = { disapproved: '#b83a3a', demoted: '#c98a16', unaffected: '#2a6fb0' };
+  return (
+    <Card title="Merchant Center" icon={Zap} span={6} linkLabel="Alla fel" onLink={() => onNavigate('seo')}
+      right={<button className="dash-link" onClick={() => reload(true)} title="Hämta igen"><RefreshCw size={12} className={loading ? 'spin' : ''} /></button>}>
+      {loading && !data ? <Spinner text="Hämtar produktstatus från Google…" /> : error ? <Err text={error} /> : data?.notConfigured ? (
+        <div className="dash-empty"><AlertTriangle size={14} color="#c98a16" /> {data.notConfigured === 'merchant-id' ? 'Merchant-id saknas – ange det under Prisbevakning.' : 'Google service-konto saknas på servern.'}</div>
+      ) : data && (
+        <>
+          <div className="dash-stats">
+            <span><b>{n(data.total)}</b> produkter i feed</span>
+            <span style={{ color: data.disapproved ? '#b83a3a' : 'inherit' }}><b>{n(data.disapproved)}</b> underkända</span>
+            <span><b>{n(data.withIssues)}</b> med anmärkning</span>
+            {data.account?.websiteClaimed === false && <span style={{ color: '#b83a3a' }}><AlertTriangle size={12} /> webbplats ej verifierad</span>}
+            {data.account?.accountLevelIssues?.length > 0 && <span style={{ color: '#b83a3a' }}><AlertTriangle size={12} /> {data.account.accountLevelIssues.length} kontoproblem</span>}
+          </div>
+          {data.topIssues?.length ? (
+            <ul className="dash-list">
+              {data.topIssues.map(g => (
+                <li key={g.code} className="clickable" onClick={() => onNavigate('seo')}>
+                  <span className="pw-badge" style={{ background: sev[g.servability] || '#9a9895' }}>{g.servability === 'disapproved' ? 'Underkänd' : g.servability === 'demoted' ? 'Nedgraderad' : 'Info'}</span>
+                  <span className="grow"><span className="title">{g.description || g.code}</span>{g.attributeName && <span className="sub">[{g.attributeName}]</span>}</span>
+                  <span className="num">{g.count}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <div className="dash-empty"><CheckCircle2 size={14} color="#2f8f55" /> Inga produktfel i feeden.</div>}
+        </>
+      )}
+    </Card>
+  );
+}
+
+// --- Google (Search Console + GA4) ---------------------------------------
+function GoogleCard({ onNavigate }) {
+  const [{ loading, data, error }, reload] = useLazy('/dashboard/google');
+  return (
+    <Card title="Google-trafik, 28 dagar" icon={Globe} span={6} linkLabel="SEO & Insikter" onLink={() => onNavigate('seo')}
+      right={<button className="dash-link" onClick={() => reload(true)} title="Hämta igen"><RefreshCw size={12} className={loading ? 'spin' : ''} /></button>}>
+      {loading && !data ? <Spinner /> : error ? <Err text={error} /> : data?.notConfigured ? (
+        <div className="dash-empty"><AlertTriangle size={14} color="#c98a16" /> {data.notConfigured === 'properties' ? 'Search Console och GA4 är inte kopplade – ange dem under SEO & Insikter.' : 'Google service-konto saknas på servern.'}</div>
+      ) : data && (
+        <div className="dash-stats" style={{ flexDirection: 'column', gap: 8 }}>
+          {data.gsc ? data.gsc.error ? <Err text={`Search Console: ${data.gsc.error}`} /> : (
+            <>
+              <span><b>{n(data.gsc.clicks)}</b> klick från Google-sök <Delta cur={data.gsc.clicks} prev={data.gsc.prevClicks} /></span>
+              <span><b>{n(data.gsc.impressions)}</b> visningar <Delta cur={data.gsc.impressions} prev={data.gsc.prevImpressions} /></span>
+            </>
+          ) : <span className="sub">Search Console ej kopplad</span>}
+          {data.ga4 ? data.ga4.error ? <Err text={`GA4: ${data.ga4.error}`} /> : (
+            <>
+              <span><b>{n(data.ga4.sessions)}</b> sessioner <Delta cur={data.ga4.sessions} prev={data.ga4.prevSessions} /></span>
+              <span><b>{n(data.ga4.purchases)}</b> köp · <b>{kr(data.ga4.revenue)}</b> <Delta cur={data.ga4.revenue} prev={data.ga4.prevRevenue} /></span>
+            </>
+          ) : <span className="sub">GA4 ej kopplad</span>}
+          <span className="sub">jämfört med föregående 28 dagar</span>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// --- Supplier (Affari) ---------------------------------------------------
+function SupplierCard({ onOpenProduct }) {
+  const [{ loading, data, error }, reload] = useLazy('/dashboard/supplier');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const fileRef = useRef(null);
+  const [tab, setTab] = useState('priceChanged');
+
+  const upload = async (file) => {
+    if (!file) return;
+    setBusy(true); setMsg(null);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch(`${API_URL}/supplier/import`, { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Import misslyckades');
+      setMsg(`${d.imported} artiklar inlästa (${d.type === 'dropship' ? 'lager & pris' : 'förpackningsantal & pris'})${d.pack?.productsUpdated != null ? `, förpackningsantal satt på ${d.pack.productsUpdated} produkter` : ''}.`);
+      await reload(true);
+    } catch (e) { setMsg(`Fel: ${e.message}`); }
+    finally { setBusy(false); if (fileRef.current) fileRef.current.value = ''; }
+  };
+
+  const TABS = [
+    { key: 'priceChanged', label: 'Inköpspris ändrat', tone: '#c98a16' },
+    { key: 'outOfStock', label: 'Slut hos Affari', tone: '#b83a3a' },
+    { key: 'notDropship', label: 'Ej dropship-godkänd', tone: '#b83a3a' },
+    { key: 'notInSupplier', label: 'Finns ej i filen', tone: '#9a9895' },
+  ];
+  const list = data?.[tab] || [];
+
+  return (
+    <Card title="Leverantör (Affari)" icon={Truck} span={6}
+      right={<>
+        <button className="dash-link" onClick={() => fileRef.current?.click()} disabled={busy}><Upload size={12} /> {busy ? 'Läser…' : 'Ladda upp Affari-fil'}</button>
+        <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: 'none' }} onChange={e => upload(e.target.files?.[0])} />
+      </>}>
+      {msg && <div className="dash-tile-sub" style={{ marginBottom: 8, color: msg.startsWith('Fel') ? '#b83a3a' : '#2f8f55' }}>{msg}</div>}
+      {loading && !data ? <Spinner /> : error ? <Err text={error} /> : data?.migrationMissing ? (
+        <Err text="Kör database/add-dashboard.sql i Supabase för att aktivera leverantörsfilen." />
+      ) : data && !data.lastImport ? (
+        <div className="dash-empty">Ingen leverantörsfil inläst ännu. Ladda upp Affaris dagliga <em>Dropship.csv</em> (lager + pris) eller <em>ExcelExportGeneral</em> (förpackningsantal).</div>
+      ) : data && (
+        <>
+          <div className="dash-stats">
+            {TABS.map(t => (
+              <span key={t.key} style={{ cursor: 'pointer', textDecoration: tab === t.key ? 'underline' : 'none' }} onClick={() => setTab(t.key)}>
+                <i className="pw-dot" style={{ background: t.tone }} /> <b>{data.counts?.[t.key] ?? 0}</b> {t.label.toLowerCase()}
+              </span>
+            ))}
+            <span className="sub">· fil {ago(data.lastImport)}</span>
+          </div>
+          {list.length ? (
+            <ul className="dash-list">
+              {list.slice(0, 6).map(r => (
+                <li key={r.sku} className={r.productId ? 'clickable' : ''} onClick={() => r.productId && onOpenProduct?.(r.productId)}>
+                  <span className="grow"><span className="title">{r.title}</span><span className="sub">{r.sku}{r.pack > 1 ? ` · ${r.pack}-pack` : ''}{r.deliveryWeek ? ` · lev. v${r.deliveryWeek}` : ''}</span></span>
+                  {tab === 'priceChanged' && (
+                    <span className="num">{kr(r.oldCost)} → <b style={{ color: r.change > 0 ? '#b83a3a' : '#2f8f55' }}>{kr(r.newCost)}</b><br /><span className="sub">pris {kr(r.currentPrice)} → bör {kr(r.suggestedPrice)}</span></span>
+                  )}
+                  {tab === 'outOfStock' && <span className="num" style={{ color: '#b83a3a' }}>lager {r.stock ?? 0}</span>}
+                </li>
+              ))}
+            </ul>
+          ) : <div className="dash-empty"><CheckCircle2 size={14} color="#2f8f55" /> Inget här.</div>}
+          <div className="dash-tile-sub" style={{ marginTop: 8 }}>Inga priser eller kostnader ändras automatiskt – listan är underlag.</div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+// --- Page --------------------------------------------------------------------
 export default function Dashboard({ onNavigate, onOpenProduct }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -119,24 +313,26 @@ export default function Dashboard({ onNavigate, onOpenProduct }) {
           <Tile icon={Zap} label="Katalogluckor" value={gaps}
             sub={`utan bild eller beskrivning, av ${healthTotal} produkter`} tone={gaps ? 'amber' : 'green'} onClick={() => onNavigate('seo')} />
 
-          {/* Price comparison */}
-          <Card title="Prisjämförelse mot marknaden" icon={Scale} span={8} linkLabel="Öppna prisbevakning" onLink={() => onNavigate('price-watch')}>
-            {pw.error ? <div className="dash-empty"><AlertTriangle size={14} /> {pw.error}</div> : (
+          {/* Sales + price comparison */}
+          <SalesCard onNavigate={onNavigate} />
+
+          <Card title="Prisjämförelse mot marknaden" icon={Scale} span={6} linkLabel="Öppna prisbevakning" onLink={() => onNavigate('price-watch')}>
+            {pw.error ? <Err text={pw.error} /> : (
               <>
                 <div className="dash-stats">
-                  <span><b>{pw.total || 0}</b> produkter med benchmark</span>
+                  <span><b>{pw.total || 0}</b> med benchmark</span>
                   {['RÖD', 'BLÅ', 'GUL', 'OK'].map(s => <span key={s}><i className={`pw-dot pw-${s}`} /> <b>{pw.byStatus?.[s] || 0}</b> {s.toLowerCase()}</span>)}
-                  <span>· hämtat {ago(pw.lastFetched)}</span>
-                  {pw.unmatched > 0 && <span style={{ color: '#c98a16' }}><AlertTriangle size={12} /> {pw.unmatched} saknar PIM-produkt (inget golvpris)</span>}
+                  <span className="sub">· hämtat {ago(pw.lastFetched)}</span>
+                  {pw.unmatched > 0 && <span style={{ color: '#c98a16' }}><AlertTriangle size={12} /> {pw.unmatched} saknar PIM-produkt</span>}
                 </div>
                 {pw.topOpen?.length ? (
                   <ul className="dash-list">
                     {pw.topOpen.map(r => (
                       <li key={r.id} className={r.product_id ? 'clickable' : ''} onClick={() => r.product_id && onOpenProduct?.(r.product_id)}>
                         <span className={`pw-badge pw-${r.price_status}`}>{r.price_status}</span>
-                        <span className="grow"><span className="title">{r.title || r.offer_id}</span><span className="sub">{r.sku}{r.pack_qty > 1 ? ` · ${r.pack_qty}-pack` : ''}</span></span>
+                        <span className="grow"><span className="title">{r.title || r.offer_id}</span><span className="sub">{r.sku}{r.pack_qty > 1 ? ` · ${r.pack_qty}-pack` : ''}{r.units_30d ? ` · ${r.units_30d} sålda` : ''}</span></span>
                         <span className="num">{kr(r.our_price)} <span className="sub">vs {kr(r.benchmark_price)}</span></span>
-                        <span className={`num ${r.price_index > 1 ? 'pw-index-up' : 'pw-index-down'}`} style={{ width: 52 }}>{Number(r.price_index).toFixed(2)}</span>
+                        <span className={`num ${r.price_index > 1 ? 'pw-index-up' : 'pw-index-down'}`} style={{ width: 44 }}>{Number(r.price_index).toFixed(2)}</span>
                       </li>
                     ))}
                   </ul>
@@ -147,8 +343,10 @@ export default function Dashboard({ onNavigate, onOpenProduct }) {
             )}
           </Card>
 
-          {/* Under floor */}
-          <Card title="Under golvpris" icon={TrendingDown} span={4} linkLabel="Visa alla" onLink={() => onNavigate('price-watch')}>
+          {/* Supplier + under floor */}
+          <SupplierCard onOpenProduct={onOpenProduct} />
+
+          <Card title="Under golvpris" icon={TrendingDown} span={6} linkLabel="Visa alla" onLink={() => onNavigate('price-watch')}>
             {pw.underFloor?.length ? (
               <ul className="dash-list">
                 {pw.underFloor.slice(0, 6).map(r => (
@@ -161,6 +359,10 @@ export default function Dashboard({ onNavigate, onOpenProduct }) {
             ) : <div className="dash-empty"><CheckCircle2 size={14} color="#2f8f55" /> Inga produkter under golvpris.</div>}
           </Card>
 
+          {/* Merchant + Google */}
+          <MerchantCard onNavigate={onNavigate} />
+          <GoogleCard onNavigate={onNavigate} />
+
           {/* Catalogue health */}
           <Card title="Kataloghälsa" icon={Search} span={6} linkLabel="SEO & Insikter" onLink={() => onNavigate('seo')}>
             <div className="dash-stats">
@@ -169,13 +371,13 @@ export default function Dashboard({ onNavigate, onOpenProduct }) {
               <span><b>{data.catalogue?.staged ?? 0}</b> i staging</span>
             </div>
             {health ? HEALTH.map(h => {
-              const n = health[h.key]?.count || 0;
-              const w = healthTotal ? Math.min(100, Math.round((n / healthTotal) * 100)) : 0;
+              const c = health[h.key]?.count || 0;
+              const w = healthTotal ? Math.min(100, Math.round((c / healthTotal) * 100)) : 0;
               return (
                 <div key={h.key} className="dash-bar" onClick={() => onNavigate('seo')}>
                   <span className="lbl">{h.label}</span>
                   <span className="track"><span className="fill" style={{ width: `${w}%`, background: h.tone }} /></span>
-                  <span className="val">{n} <span className="sub">({w} %)</span></span>
+                  <span className="val">{c} <span className="sub">({w} %)</span></span>
                 </div>
               );
             }) : <div className="dash-empty">{data.catalogue?.health?.error || 'Ingen data'}</div>}

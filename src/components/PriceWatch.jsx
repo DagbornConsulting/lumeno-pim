@@ -310,7 +310,7 @@ export default function PriceWatch({ onOpenProduct }) {
         <label><input type="checkbox" checked={filter.open} onChange={e => setFilter(f => ({ ...f, open: e.target.checked }))} /> Endast okvitterade varningar</label>
         <label>Sortera
           <select className="form-input" value={filter.sort} onChange={e => setFilter(f => ({ ...f, sort: e.target.value }))}>
-            <option value="impact">Påverkan (kr-avvikelse)</option>
+            <option value="impact">Påverkan (kr-avvikelse × sålda 30 d)</option>
             <option value="index">Index (störst avvikelse)</option>
             <option value="title">Titel</option>
           </select>
@@ -337,6 +337,7 @@ export default function PriceWatch({ onOpenProduct }) {
                 <th className="num">Benchmark</th>
                 <th className="num">Index</th>
                 <th className="num">Golvpris</th>
+                <th className="num" title="Sålda enheter senaste 30 dagarna (från Shopify-ordrar, uppdateras när Översikten laddas)">Sålda 30 d</th>
                 <th>Hämtad</th>
                 <th>Kvittering</th>
               </tr>
@@ -358,6 +359,7 @@ export default function PriceWatch({ onOpenProduct }) {
                     <td className="num">{kr(r.benchmark_price)}</td>
                     <td className={`num ${r.price_index == null ? '' : up ? 'pw-index-up' : r.price_index < 1 ? 'pw-index-down' : ''}`}>{idxFmt(r.price_index)}</td>
                     <td className="num">{kr(r.floor_price)}</td>
+                    <td className="num">{r.units_30d ? r.units_30d : <span className="pw-sub">0</span>}</td>
                     <td className="pw-sub">{r.benchmark_fetched_at ? new Date(r.benchmark_fetched_at).toLocaleDateString('sv-SE') : '–'}</td>
                     <td className="pw-sub">
                       {r.acknowledged_at ? <><Check size={12} /> {r.acknowledged_by} {new Date(r.acknowledged_at).toLocaleDateString('sv-SE')}</> : (['RÖD', 'BLÅ', 'GUL'].includes(r.price_status) ? 'öppen' : '')}
@@ -365,7 +367,7 @@ export default function PriceWatch({ onOpenProduct }) {
                   </tr>,
                   isOpen && (
                     <tr key={`${r.id}-d`}>
-                      <td colSpan={10} style={{ background: 'transparent' }}>
+                      <td colSpan={11} style={{ background: 'transparent' }}>
                         <dl className="pw-detail">
                           <div><dt>Status</dt><dd><span className={`pw-badge pw-${r.price_status}`}>{r.price_status}</span> <span className="pw-sub">{STATUS_META[r.price_status]?.hint}</span></dd></div>
                           <div><dt>Vårt pris</dt><dd>{kr(r.our_price)}{r.pack_qty > 1 && <span className="pw-sub"> ({kr2(r.unit_price_ours)}/st)</span>}</dd></div>

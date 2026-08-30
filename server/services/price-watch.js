@@ -269,10 +269,37 @@ export async function runFetch({ store, trigger = 'manual' }) {
 
 // --- Queries ----------------------------------------------------------------
 
+// Impact = price gap in SEK × units sold last 30 days (min 1, so products
+// without sales still rank by gap). Sales come from applySales().
 const impactOf = r => {
   const ours = num(r.our_price), b = num(r.benchmark_price);
-  return ours != null && b != null ? Math.abs(ours - b) : 0;
+  const gap = ours != null && b != null ? Math.abs(ours - b) : 0;
+  return gap * Math.max(1, Number(r.units_30d) || 0);
 };
+
+// Write per-SKU sales (from Shopify orders) onto the benchmark rows.
+export async function applySales(storeId, bySku) {
+  if (!bySku || !Object.keys(bySku).length) return { updated: 0 };
+  const rows = await fetchAll('price_benchmarks', 'id, sku', q => q.eq('store_id', storeId).not('sku', 'is', null));
+  const groups = new Map(); // "units|revenue" -> [ids]
+  for (const r of rows) {
+    const s = bySku[String(r.sku).trim()];
+    const key = s ? `${s.units}|${Math.round(s.revenue)}` : '0|0';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r.id);
+  }
+  let updated = 0;
+  for (const [key, ids] of groups) {
+    const [units, revenue] = key.split('|').map(Number);
+    if (units === 0 && revenue === 0 && ids.length === rows.length) continue; // nothing sold, nothing to write
+    for (let i = 0; i < ids.length; i += 300) {
+      const { error } = await supabase.from('price_benchmarks').update({ units_30d: units, revenue_30d: revenue }).in('id', ids.slice(i, i + 300));
+      if (error) { if (/units_30d/.test(error.message)) return { updated: 0, migrationMissing: true }; throw new Error(error.message); }
+      updated += Math.min(300, ids.length - i);
+    }
+  }
+  return { updated };
+}
 
 export async function listItems({ storeId, status, open, q, sort = 'impact', limit = 2000 }) {
   let query = supabase.from('price_benchmarks').select('*').eq('store_id', storeId);
@@ -368,11 +395,11 @@ export async function unacknowledge({ storeId, id, user }) {
 
 export async function exportCsv(storeId) {
   const rows = await listItems({ storeId, limit: 5000 });
-  const H = ['status', 'kvitterad', 'sku', 'titel', 'offer_id', 'pack', 'vart_pris', 'styckpris', 'benchmark', 'index', 'inkop_per_artikel', 'golvpris', 'kalla', 'antal_kallor', 'hamtad', 'kvitterad_av', 'kvitterad_datum', 'kvitterad_benchmark', 'kvittering_notering'];
+  const H = ['status', 'kvitterad', 'sku', 'titel', 'offer_id', 'pack', 'vart_pris', 'styckpris', 'benchmark', 'index', 'inkop_per_artikel', 'golvpris', 'salda_30d', 'kalla', 'antal_kallor', 'hamtad', 'kvitterad_av', 'kvitterad_datum', 'kvitterad_benchmark', 'kvittering_notering'];
   const esc = v => { const s = v == null ? '' : String(v); return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = rows.map(r => [
     r.price_status, r.acknowledged_at ? 'ja' : 'nej', r.sku, r.title, r.offer_id, r.pack_qty, r.our_price, r.unit_price_ours, r.benchmark_price,
-    r.price_index, r.cost_price, r.floor_price, r.reference_source, r.source_count, r.benchmark_fetched_at,
+    r.price_index, r.cost_price, r.floor_price, r.units_30d ?? 0, r.reference_source, r.source_count, r.benchmark_fetched_at,
     r.acknowledged_by, r.acknowledged_at, r.acknowledged_benchmark, r.acknowledged_note,
   ].map(esc).join(';'));
   return '﻿' + H.join(';') + '\n' + lines.join('\n');

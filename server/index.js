@@ -18,6 +18,8 @@ import { feedService } from './feed-generator.js';
 import { computeProductDiff, buildSyncPlan } from './services/sync-engine.js';
 import * as googleSeo from './services/google-seo.js';
 import * as priceWatch from './services/price-watch.js';
+import * as shopifySales from './services/shopify-sales.js';
+import * as supplierFile from './services/supplier-file.js';
 
 // Heavy modules — loaded in the background so they don't block cold-start parsing
 let anthropic = null;
@@ -2948,48 +2950,56 @@ app.get('/api/seo/gsc/sites', async (req, res) => {
 
 // Merchant Center: account-level issues + product feed problems, grouped by
 // issue type so they read as an actionable to-fix list.
+// Fetch account + product statuses from Merchant Center and group product
+// issues by code (severity first, then count). Cached 30 min per merchant so
+// the dashboard and the SEO tab don't page through the whole feed on every load.
+const _merchantCache = new Map(); // merchantId -> { at, data }
+const fetchMerchantSummary = async (merchantId, { force = false } = {}) => {
+  const hit = _merchantCache.get(merchantId);
+  if (!force && hit && Date.now() - hit.at < 30 * 60 * 1000) return hit.data;
+
+  const [account, productStatuses] = await Promise.all([
+    googleSeo.merchantAccountStatus({ merchantId }).catch(e => ({ error: e.message })),
+    googleSeo.merchantProductStatuses({ merchantId }),
+  ]);
+  const byCode = new Map();
+  let withIssues = 0, disapproved = 0;
+  for (const p of productStatuses) {
+    if (p.issues.length) withIssues++;
+    if (p.issues.some(i => i.servability === 'disapproved')) disapproved++;
+    for (const i of p.issues) {
+      if (!byCode.has(i.code)) {
+        byCode.set(i.code, {
+          code: i.code, description: i.description, servability: i.servability,
+          resolution: i.resolution, documentation: i.documentation,
+          attributeName: i.attributeName, count: 0, samples: [],
+        });
+      }
+      const g = byCode.get(i.code);
+      g.count++;
+      if (g.samples.length < 8) g.samples.push({ productId: p.productId, title: p.title, link: p.link });
+    }
+  }
+  const rank = s => (s === 'disapproved' ? 0 : s === 'demoted' ? 1 : 2);
+  const groups = [...byCode.values()].sort((a, b) => rank(a.servability) - rank(b.servability) || b.count - a.count);
+  const data = {
+    fetchedAt: new Date().toISOString(),
+    account: account?.error ? { error: account.error } : {
+      accountId: account.accountId,
+      websiteClaimed: account.websiteClaimed,
+      accountLevelIssues: account.accountLevelIssues,
+    },
+    products: { total: productStatuses.length, withIssues, disapproved, byIssue: groups },
+  };
+  _merchantCache.set(merchantId, { at: Date.now(), data });
+  return data;
+};
+
 app.get('/api/seo/merchant/issues', async (req, res) => {
   try {
     const { merchantId } = await seoConfig(req);
     if (!merchantId) return res.status(400).json({ error: 'Merchant Center account-id ej konfigurerat' });
-
-    const [account, productStatuses] = await Promise.all([
-      googleSeo.merchantAccountStatus({ merchantId }).catch(e => ({ error: e.message })),
-      googleSeo.merchantProductStatuses({ merchantId }),
-    ]);
-
-    // Group product issues by code, keep severity + a few affected samples.
-    const byCode = new Map();
-    let withIssues = 0, disapproved = 0;
-    for (const p of productStatuses) {
-      if (p.issues.length) withIssues++;
-      if (p.issues.some(i => i.servability === 'disapproved')) disapproved++;
-      for (const i of p.issues) {
-        if (!byCode.has(i.code)) {
-          byCode.set(i.code, {
-            code: i.code, description: i.description, servability: i.servability,
-            resolution: i.resolution, documentation: i.documentation,
-            attributeName: i.attributeName, count: 0, samples: [],
-          });
-        }
-        const g = byCode.get(i.code);
-        g.count++;
-        if (g.samples.length < 8) g.samples.push({ productId: p.productId, title: p.title, link: p.link });
-      }
-    }
-    const groups = [...byCode.values()].sort((a, b) => {
-      const rank = s => (s === 'disapproved' ? 0 : s === 'demoted' ? 1 : 2);
-      return rank(a.servability) - rank(b.servability) || b.count - a.count;
-    });
-
-    res.json({
-      account: account?.error ? { error: account.error } : {
-        accountId: account.accountId,
-        websiteClaimed: account.websiteClaimed,
-        accountLevelIssues: account.accountLevelIssues,
-      },
-      products: { total: productStatuses.length, withIssues, disapproved, byIssue: groups },
-    });
+    res.json(await fetchMerchantSummary(merchantId, { force: req.query.refresh === '1' }));
   } catch (e) {
     console.error('Merchant issues error:', e);
     res.status(500).json({ error: e.message });
@@ -3352,6 +3362,104 @@ app.get('/api/dashboard', async (req, res) => {
     console.error('Dashboard error:', e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Dashboard blocks that call external APIs load separately so the core page
+// renders at once. All read-only.
+
+// Sales (Shopify orders, last 30 days) + push per-SKU units onto price
+// benchmarks so price alerts can rank by impact.
+app.get('/api/dashboard/sales', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!store.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
+    const sales = await shopifySales.getSales(store, { days: 30, force: req.query.refresh === '1' });
+    priceWatch.applySales(store.id, sales.bySku).catch(e => console.error('applySales:', e.message));
+    const { bySku, ...rest } = sales;
+    res.json(rest);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Merchant Center: disapprovals + top issue groups (Merchant API, cached).
+app.get('/api/dashboard/merchant', async (req, res) => {
+  try {
+    const { merchantId } = await seoConfig(req);
+    if (!googleSeo.isConfigured()) return res.json({ notConfigured: 'service-account' });
+    if (!merchantId) return res.json({ notConfigured: 'merchant-id' });
+    const m = await fetchMerchantSummary(merchantId, { force: req.query.refresh === '1' });
+    res.json({
+      fetchedAt: m.fetchedAt,
+      account: m.account,
+      total: m.products.total, withIssues: m.products.withIssues, disapproved: m.products.disapproved,
+      topIssues: m.products.byIssue.slice(0, 5).map(g => ({ code: g.code, description: g.description, servability: g.servability, count: g.count, attributeName: g.attributeName })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Search Console + GA4: last 28 days vs the 28 before.
+const _googleCache = new Map();
+app.get('/api/dashboard/google', async (req, res) => {
+  try {
+    const { storeId, siteUrl, propertyId } = await seoConfig(req);
+    if (!googleSeo.isConfigured()) return res.json({ notConfigured: 'service-account' });
+    if (!siteUrl && !propertyId) return res.json({ notConfigured: 'properties' });
+    const key = `${storeId}:${siteUrl}:${propertyId}`;
+    const hit = _googleCache.get(key);
+    if (req.query.refresh !== '1' && hit && Date.now() - hit.at < 30 * 60 * 1000) return res.json(hit.data);
+
+    const sum = (rows, k) => rows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+    const out = { fetchedAt: new Date().toISOString(), gsc: null, ga4: null };
+    if (siteUrl) {
+      try {
+        const [cur, prev] = await Promise.all([
+          googleSeo.gscSearchAnalytics({ siteUrl, startDate: ymdDaysAgo(28), endDate: ymdDaysAgo(1), dimensions: ['date'], rowLimit: 100 }),
+          googleSeo.gscSearchAnalytics({ siteUrl, startDate: ymdDaysAgo(56), endDate: ymdDaysAgo(29), dimensions: ['date'], rowLimit: 100 }),
+        ]);
+        out.gsc = { clicks: sum(cur, 'clicks'), impressions: sum(cur, 'impressions'), prevClicks: sum(prev, 'clicks'), prevImpressions: sum(prev, 'impressions') };
+      } catch (e) { out.gsc = { error: e.message }; }
+    }
+    if (propertyId) {
+      try {
+        const metrics = ['sessions', 'ecommercePurchases', 'purchaseRevenue'];
+        const [cur, prev] = await Promise.all([
+          googleSeo.ga4RunReport({ propertyId, startDate: '28daysAgo', endDate: 'yesterday', metrics }),
+          googleSeo.ga4RunReport({ propertyId, startDate: '56daysAgo', endDate: '29daysAgo', metrics }),
+        ]);
+        const c = cur.rows[0] || {}, p = prev.rows[0] || {};
+        out.ga4 = { sessions: c.sessions || 0, purchases: c.ecommercePurchases || 0, revenue: Math.round(c.purchaseRevenue || 0), prevSessions: p.sessions || 0, prevPurchases: p.ecommercePurchases || 0, prevRevenue: Math.round(p.purchaseRevenue || 0) };
+      } catch (e) { out.ga4 = { error: e.message }; }
+    }
+    _googleCache.set(key, { at: Date.now(), data: out });
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Supplier (Affari) snapshot vs live catalogue.
+app.get('/api/dashboard/supplier', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json(await supplierFile.supplierReport(store.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Upload Affari's Dropship.csv (stock/price) or ExcelExportGeneral (pack_qty).
+app.post('/api/supplier/import', upload.single('file'), async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!req.file) return res.status(400).json({ error: 'Ingen fil' });
+    const name = req.file.originalname || 'fil';
+    let parsed;
+    if (name.toLowerCase().endsWith('.csv')) {
+      if (!parseCsvBuffer) ({ parseCsvBuffer } = await import('./services/csv-parser.js'));
+      parsed = await parseCsvBuffer(req.file.buffer, {});
+    } else {
+      if (!parseExcelBuffer) ({ parseExcelBuffer } = await import('./services/excel-parser.js'));
+      parsed = await parseExcelBuffer(req.file.buffer, {});
+    }
+    const result = await supplierFile.importSupplierFile({ storeId: store.id, rows: parsed.rows, filename: name });
+    try { await db.logActivity('supplier_import', 'store', store.id, `Leverantörsfil importerad: ${name} (${result.imported} artiklar${result.type === 'export' ? ', förpackningsantal' : ''})`, { type: result.type, rows: result.rows }); } catch (_) {}
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // AI article ideas for topical authority, derived from the catalogue's own

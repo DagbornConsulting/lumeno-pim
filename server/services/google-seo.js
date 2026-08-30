@@ -19,7 +19,7 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SCOPES = [
   'https://www.googleapis.com/auth/webmasters.readonly',
   'https://www.googleapis.com/auth/analytics.readonly',
-  'https://www.googleapis.com/auth/content', // Merchant Center (Content API for Shopping)
+  'https://www.googleapis.com/auth/content', // Merchant Center (Merchant API)
 ].join(' ');
 
 let _tokenCache = null; // { token, exp }
@@ -166,55 +166,67 @@ export async function ga4RunReport({ propertyId, startDate, endDate, dimensions 
   return { rows, dimensionHeaders: dimHeaders, metricHeaders: metHeaders, totalRows: data.rowCount || rows.length };
 }
 
-// --- Merchant Center (Content API for Shopping v2.1) --------------------
+// --- Merchant Center (Merchant API) ---------------------------------------
+// The Content API for Shopping was sunset 2026-08-18; these use the Merchant
+// API and keep the same return shapes as before so the UI is unchanged.
 
-const CONTENT_BASE = 'https://shoppingcontent.googleapis.com/content/v2.1';
-
-// Account-level status: is the account suspended, plus account-wide issues.
-export async function merchantAccountStatus({ merchantId }) {
-  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+// GET helper against a Merchant API sub-service (accounts, products, ...),
+// trying v1 and falling back to v1beta.
+async function merchantApiGet(service, merchantId, path, params = {}) {
   const token = await getAccessToken();
   const id = String(merchantId).replace(/[^0-9]/g, '');
-  const res = await fetch(`${CONTENT_BASE}/${id}/accountstatuses/${id}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`Merchant-fel: ${data.error?.message || res.status}`);
+  let lastErr = null;
+  for (const version of ['v1', 'v1beta']) {
+    const url = new URL(`${MERCHANT_API}/${service}/${version}/accounts/${id}/${path}`);
+    for (const [k, v] of Object.entries(params)) if (v != null && v !== '') url.searchParams.set(k, String(v));
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return data;
+    lastErr = new Error(`Merchant API-fel (${res.status}): ${data.error?.message || 'okänt fel'}`);
+    if (res.status !== 404) throw lastErr;
+  }
+  throw lastErr;
+}
+
+// Account-level status: website claim + account issues.
+export async function merchantAccountStatus({ merchantId }) {
+  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+  const id = String(merchantId).replace(/[^0-9]/g, '');
+  const [issuesRes, homepage] = await Promise.all([
+    merchantApiGet('accounts', id, 'issues', { pageSize: 100 }),
+    merchantApiGet('accounts', id, 'homepage').catch(() => null),
+  ]);
   return {
-    accountId: data.accountId,
-    websiteClaimed: data.websiteClaimed,
-    accountLevelIssues: (data.accountLevelIssues || []).map(i => ({
-      id: i.id, title: i.title, country: i.country, severity: i.severity,
-      detail: i.detail, documentation: i.documentation,
+    accountId: id,
+    websiteClaimed: homepage ? !!homepage.claimed : null,
+    accountLevelIssues: (issuesRes.accountIssues || []).map(i => ({
+      id: i.name, title: i.title, severity: i.severity,
+      country: (i.impactedDestinations || []).flatMap(d => (d.impacts || []).map(x => x.regionCode)).filter(Boolean).join(', ') || null,
+      detail: i.detail, documentation: i.documentationUri,
     })),
-    products: data.products || [],
+    products: [],
   };
 }
 
-// Per-product status incl. itemLevelIssues (disapprovals, GTIN, image, price…).
+// Per-product status incl. item-level issues (disapprovals, GTIN, image, price…).
 // Paginates; returns a flat list of products with their issues.
 export async function merchantProductStatuses({ merchantId, maxPages = 20 }) {
   if (!merchantId) throw new Error('Merchant Center account-id saknas');
-  const token = await getAccessToken();
-  const id = String(merchantId).replace(/[^0-9]/g, '');
   const out = [];
   let pageToken = null, pages = 0;
+  const servability = s => (s === 'DISAPPROVED' ? 'disapproved' : s === 'DEMOTED' ? 'demoted' : 'unaffected');
   do {
-    const url = new URL(`${CONTENT_BASE}/${id}/productstatuses`);
-    url.searchParams.set('maxResults', '250');
-    if (pageToken) url.searchParams.set('pageToken', pageToken);
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    if (!res.ok) throw new Error(`Merchant-fel: ${data.error?.message || res.status}`);
-    for (const p of data.resources || []) {
+    const data = await merchantApiGet('products', merchantId, 'products', { pageSize: 250, pageToken });
+    for (const p of data.products || []) {
+      const st = p.productStatus || {};
       out.push({
-        productId: p.productId,
-        title: p.title,
-        link: p.link,
-        issues: (p.itemLevelIssues || []).map(i => ({
-          code: i.code, servability: i.servability, resolution: i.resolution,
-          attributeName: i.attributeName, description: i.description, detail: i.detail,
-          documentation: i.documentation,
+        productId: p.offerId || p.name,
+        title: p.attributes?.title || p.productAttributes?.title || null,
+        link: p.attributes?.link || p.productAttributes?.link || null,
+        issues: (st.itemLevelIssues || []).map(i => ({
+          code: i.code, servability: servability(i.severity),
+          resolution: i.resolution === 'MERCHANT_ACTION' ? 'merchant_action' : (i.resolution || '').toLowerCase(),
+          attributeName: i.attribute, description: i.description, detail: i.detail, documentation: i.documentation,
         })),
       });
     }
