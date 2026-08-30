@@ -17,6 +17,7 @@ import { processImage, downloadImage, generateAltText, getImageMetadata } from '
 import { feedService } from './feed-generator.js';
 import { computeProductDiff, buildSyncPlan } from './services/sync-engine.js';
 import * as googleSeo from './services/google-seo.js';
+import * as priceWatch from './services/price-watch.js';
 
 // Heavy modules — loaded in the background so they don't block cold-start parsing
 let anthropic = null;
@@ -2993,6 +2994,123 @@ app.get('/api/seo/merchant/issues', async (req, res) => {
   }
 });
 
+// ============================================
+// PRISBEVAKNING (price watch)
+// Merchant Center price benchmark vs our price → status per offer.
+// Read-only towards Shopify: nothing here ever writes a price.
+// ============================================
+const priceWatchStore = async (req) => {
+  const storeId = await resolveStoreId(req);
+  const store = storeId ? await db.getStoreById(storeId) : null;
+  if (!store) throw new Error('Ingen butik vald');
+  return store;
+};
+const currentUserLabel = (req) => req.user?.email || req.user?.username || req.user?.name || req.user?.id || 'okänd';
+const PRICE_WATCH_HOUR = process.env.PRICE_WATCH_HOUR === 'off' ? null
+  : (Number.isFinite(Number(process.env.PRICE_WATCH_HOUR)) && process.env.PRICE_WATCH_HOUR !== '' ? Number(process.env.PRICE_WATCH_HOUR) : 4);
+
+app.get('/api/price-watch/status', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    let email = null;
+    try { email = googleSeo.getServiceAccount()?.client_email || null; } catch (_) {}
+    const summary = await priceWatch.summary(store.id);
+    res.json({
+      credentials: googleSeo.isConfigured(),
+      serviceAccountEmail: email,
+      merchantId: store.settings?.google?.merchant_id || null,
+      settings: priceWatch.getSettings(store),
+      scheduleHour: PRICE_WATCH_HOUR,
+      ...summary,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Save Merchant id (shared with SEO & Insikter) and/or price-watch thresholds.
+app.post('/api/price-watch/config', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const { merchantId, settings } = req.body || {};
+    const next = { ...(store.settings || {}) };
+    if (merchantId !== undefined) next.google = { ...(next.google || {}), merchant_id: merchantId ? String(merchantId).replace(/[^0-9]/g, '') || null : null };
+    if (settings && typeof settings === 'object') next.price_watch = { ...(next.price_watch || {}), ...priceWatch.sanitizeSettings(settings) };
+    const { error } = await supabase.from('stores').update({ settings: next }).eq('id', store.id);
+    if (error) throw error;
+    res.json({ ok: true, merchantId: next.google?.merchant_id || null, settings: priceWatch.getSettings({ settings: next }) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Fetch benchmarks now (same job as the nightly run).
+app.post('/api/price-watch/fetch', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!googleSeo.isConfigured()) return res.status(400).json({ error: 'Google service-account saknas (GOOGLE_SERVICE_ACCOUNT_JSON)' });
+    res.json(await priceWatch.runFetch({ store, trigger: 'manual' }));
+  } catch (e) {
+    console.error('Price watch fetch error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/price-watch/items', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const { status, open, q, sort, limit } = req.query;
+    const items = await priceWatch.listItems({ storeId: store.id, status, open: open === '1' || open === 'true', q, sort, limit });
+    res.json({ items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/price-watch/runs', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json({ runs: await priceWatch.listRuns(store.id) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Acknowledge: the alert stays silent until the benchmark moves > ack_threshold.
+app.post('/api/price-watch/items/:id/ack', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json(await priceWatch.acknowledge({ storeId: store.id, id: req.params.id, user: currentUserLabel(req), note: req.body?.note }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/price-watch/items/:id/ack', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json(await priceWatch.unacknowledge({ storeId: store.id, id: req.params.id, user: currentUserLabel(req) }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/price-watch/export.csv', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const csv = await priceWatch.exportCsv(store.id);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="prisbevakning-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.send(csv);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Import pack_qty (Affari "Förpackningsantal dropship") from an xlsx/csv export.
+app.post('/api/price-watch/pack-import', upload.single('file'), async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!req.file) return res.status(400).json({ error: 'Ingen fil' });
+    const name = (req.file.originalname || '').toLowerCase();
+    let parsed;
+    if (name.endsWith('.csv')) {
+      if (!parseCsvBuffer) ({ parseCsvBuffer } = await import('./services/csv-parser.js'));
+      parsed = await parseCsvBuffer(req.file.buffer, {});
+    } else {
+      if (!parseExcelBuffer) ({ parseExcelBuffer } = await import('./services/excel-parser.js'));
+      parsed = await parseExcelBuffer(req.file.buffer, {});
+    }
+    res.json(await priceWatch.importPackQty({ storeId: store.id, rows: parsed.rows }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Top search queries (clicks/impressions/ctr/position).
 app.get('/api/seo/gsc/queries', async (req, res) => {
   try {
@@ -5691,6 +5809,30 @@ if (PULL_MINUTES > 0 && isDbConfigured()) {
   };
   console.log(`🔄 Shopify→PIM pull-poll enabled: every ${PULL_MINUTES} min`);
   setInterval(runPoll, PULL_MINUTES * 60 * 1000);
+}
+
+// Nightly price-watch fetch (Merchant Center benchmark → price_benchmarks).
+// Runs once per day at PRICE_WATCH_HOUR (server local time, default 04) on a
+// persistent host. PRICE_WATCH_HOUR=off disables. Never writes to Shopify.
+if (PRICE_WATCH_HOUR != null && isDbConfigured()) {
+  let pwLastDay = null;
+  let pwRunning = false;
+  const priceWatchTick = async () => {
+    const now = new Date();
+    const day = now.toISOString().slice(0, 10);
+    if (pwRunning || pwLastDay === day || now.getHours() !== PRICE_WATCH_HOUR) return;
+    if (!googleSeo.isConfigured()) return;
+    pwRunning = true; pwLastDay = day;
+    try {
+      for (const store of (await db.getStores()) || []) {
+        if (!store.settings?.google?.merchant_id) continue;
+        try { await priceWatch.runFetch({ store, trigger: 'scheduled' }); }
+        catch (e) { console.error(`Prisbevakning misslyckades för ${store.name}:`, e.message); }
+      }
+    } finally { pwRunning = false; }
+  };
+  setInterval(priceWatchTick, 10 * 60 * 1000);
+  console.log(`💰 Prisbevakning: nattlig hämtning kl ${String(PRICE_WATCH_HOUR).padStart(2, '0')}:00`);
 }
 
 // GET /api/shopify/stores/:storeId/products/:productId/sync-diff

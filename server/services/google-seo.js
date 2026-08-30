@@ -223,3 +223,62 @@ export async function merchantProductStatuses({ merchantId, maxPages = 20 }) {
   } while (pageToken && pages < maxPages);
   return out;
 }
+
+// --- Merchant API (replaces Content API for Shopping, sunset 2026-08-18) ----
+// https://developers.google.com/merchant/api/guides/reports/overview
+const MERCHANT_API = 'https://merchantapi.googleapis.com';
+const micros = m => (m && m.amountMicros != null ? Number(m.amountMicros) / 1e6 : null);
+
+// Run a Merchant Center Query Language statement via accounts.reports.search,
+// following nextPageToken until the report is exhausted. Tries reports/v1 and
+// falls back to reports/v1beta if the GA surface is not available.
+export async function merchantReportSearch({ merchantId, query, pageSize = 1000, maxPages = 200 }) {
+  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+  const token = await getAccessToken();
+  const id = String(merchantId).replace(/[^0-9]/g, '');
+  const results = [];
+  let pageToken = null;
+  let version = 'v1';
+  for (let page = 0; page < maxPages; page++) {
+    const res = await fetch(`${MERCHANT_API}/reports/${version}/accounts/${id}/reports:search`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, pageSize, ...(pageToken ? { pageToken } : {}) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 404 && version === 'v1' && page === 0) { version = 'v1beta'; page--; continue; }
+    if (!res.ok) throw new Error(`Merchant API-fel (${res.status}): ${data.error?.message || 'okänt fel'}`);
+    results.push(...(data.results || []));
+    pageToken = data.nextPageToken || null;
+    if (!pageToken) break;
+  }
+  return results;
+}
+
+// Price competitiveness (Market Insights): our price vs Google's benchmark
+// per offer. Amounts come in micros (1 SEK = 1 000 000) → converted to SEK.
+// Returns [{ id, offerId, title, brand, country, currency, price, benchmark }].
+export async function merchantPriceCompetitiveness({ merchantId }) {
+  const base = 'title, brand, price, benchmark_price, report_country_code';
+  let results;
+  try {
+    results = await merchantReportSearch({ merchantId, query: `SELECT id, offer_id, ${base} FROM price_competitiveness_product_view` });
+  } catch (e) {
+    if (!/offer_id/i.test(e.message)) throw e;
+    results = await merchantReportSearch({ merchantId, query: `SELECT id, ${base} FROM price_competitiveness_product_view` });
+  }
+  return results
+    .map(r => r.priceCompetitivenessProductView)
+    .filter(Boolean)
+    .map(v => ({
+      id: v.id || null,
+      // id format: channel~languageCode~feedLabel~offerId
+      offerId: v.offerId || String(v.id || '').split('~').pop(),
+      title: v.title || null,
+      brand: v.brand || null,
+      country: v.reportCountryCode || null,
+      currency: v.price?.currencyCode || v.benchmarkPrice?.currencyCode || null,
+      price: micros(v.price),
+      benchmark: micros(v.benchmarkPrice),
+    }));
+}

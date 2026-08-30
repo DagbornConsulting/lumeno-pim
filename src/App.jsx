@@ -6,7 +6,7 @@ import {
   Zap, Database, RefreshCw, PanelRightOpen, PanelRightClose,
   Globe, Tag, Layers, Box, ShoppingBag, Shirt, CircleDot,
   CheckCircle2, AlertCircle, FileText, Wand2, Loader2, LogOut,
-  Users, FolderInput, TrendingUp
+  Users, FolderInput, TrendingUp, Scale
 } from 'lucide-react';
 import Login from './components/Login';
 import './components/Login.css';
@@ -20,6 +20,7 @@ import MarginEngine from './components/MarginEngine';
 import InventorySync from './components/InventorySync';
 import StagingProducts from './components/StagingProducts';
 import SeoInsights from './components/SeoInsights';
+import PriceWatch from './components/PriceWatch';
 import ShopifyImport from './components/ShopifyImport';
 import { transformDbProduct } from './lib/transformProduct';
 import StoreManager from './components/StoreManager';
@@ -808,6 +809,13 @@ export default function App() {
             <span className="nav-label">Marginal & Vinst</span>
           </div>
           <div
+            className={`nav-item ${activeView === 'price-watch' ? 'active' : ''}`}
+            onClick={() => setActiveView('price-watch')}
+          >
+            <Scale size={20} />
+            <span className="nav-label">Prisbevakning</span>
+          </div>
+          <div
             className={`nav-item ${activeView === 'feeds' ? 'active' : ''}`}
             onClick={() => setActiveView('feeds')}
           >
@@ -980,6 +988,17 @@ export default function App() {
 
           {activeView === 'margin' && (
             <MarginEngine />
+          )}
+
+          {activeView === 'price-watch' && (
+            <PriceWatch
+              onOpenProduct={async (id) => {
+                try {
+                  const r = await fetch(`${API_URL}/db/products/${id}`);
+                  if (r.ok) setSelectedProductForEdit(transformDbProduct(await r.json()));
+                } catch (_) { /* ignore */ }
+              }}
+            />
           )}
 
           {activeView === 'inventory' && (
