@@ -2217,6 +2217,21 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: `Filtyp "${ext}" stöds inte` });
     }
 
+    // The daily Affari file also feeds the dashboard's supplier snapshot
+    // (stock, dropship approval, purchase price) — same upload, no extra step.
+    // Awaited (serverless would kill a fire-and-forget), but never fatal.
+    let supplierSnapshot = null;
+    if (supplierFile.detectFileType(parsed.headers)) {
+      try {
+        const r = await supplierFile.importSupplierFile({ storeId, rows: parsed.rows, filename: req.file.originalname });
+        supplierSnapshot = { type: r.type, imported: r.imported, counts: r.report?.counts };
+        try { await db.logActivity('supplier_import', 'store', storeId, `Leverantörsfil inläst via lagerimport: ${req.file.originalname} (${r.imported} artiklar)`, { type: r.type }); } catch (_) {}
+      } catch (e) {
+        supplierSnapshot = { error: e.message };
+        console.warn('Supplier snapshot skipped:', e.message);
+      }
+    }
+
     // Auto-detect columns if not specified
     const headers = parsed.headers;
     const resolvedSkuCol = skuColumn || headers.find(h => /sku|artnr|artikel/i.test(h)) || headers[0];
@@ -2453,6 +2468,7 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       headers,
       resolvedSkuCol,
       resolvedQtyCol,
+      supplierSnapshot,
       totalRows: parsed.totalRows,
       matched: diff.length,
       changed: diff.filter(r => r.changed).length,
