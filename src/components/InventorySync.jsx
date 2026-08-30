@@ -20,6 +20,32 @@ export default function InventorySync({ mode = 'both', onCreated } = {}) {
 
   // "Create new" tab state
   const [activeTab, setActiveTab] = useState(mode === 'import' ? 'create' : 'update');
+  // Cost check: supplier price × pack vs Shopify "cost per item".
+  const [costSelected, setCostSelected] = useState(new Set());
+
+  const handleApplyCost = async () => {
+    if (!diff?.costDiff?.length || !storeId || !costSelected.size) return;
+    const items = diff.costDiff.filter(r => costSelected.has(r.sku)).map(r => ({
+      sku: r.sku, inventoryItemId: r.inventoryItemId, expectedCost: r.expectedCost, supplierUnitCost: r.supplierUnitCost,
+    }));
+    setLoading('apply-cost');
+    try {
+      const r = await fetch(`${API_URL}/inventory/apply-cost`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storeId, items }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Fel vid uppdatering');
+      showToast(`Inköpspris rättat på ${data.updated} artiklar i Shopify${data.failed ? `, ${data.failed} misslyckades` : ''}`, data.failed ? 'warning' : 'success');
+      const failed = new Set((data.errors || []).map(e => e.sku));
+      setDiff(prev => prev ? { ...prev, costDiff: prev.costDiff.filter(r => !costSelected.has(r.sku) || failed.has(r.sku)) } : prev);
+      setCostSelected(new Set());
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading('');
+    }
+  };
   const [newRows, setNewRows] = useState([]);
   const [newSelected, setNewSelected] = useState(new Set());
   const [aiLoading, setAiLoading] = useState(false);
@@ -389,12 +415,83 @@ export default function InventorySync({ mode = 'both', onCreated } = {}) {
                 <PackagePlus size={14} /> Skapa nya ({diff.newCount || 0})
               </button>
             )}
+            {showUpdate && diff.costDiff && (
+              <button
+                className={`btn ${activeTab === 'cost' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setActiveTab('cost')}
+                style={diff.costDiff.length && activeTab !== 'cost' ? { borderColor: '#f59e0b', color: '#b45309' } : undefined}
+                title="Affaris pris × förpackningsantal jämfört med Shopifys kostnad per artikel"
+              >
+                Inköpspris avviker ({diff.costDiff.length})
+              </button>
+            )}
             {diff.alreadyInPimCount > 0 && (
               <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-secondary, #888)' }}>
                 {diff.alreadyInPimCount} finns redan i PIM (ej pushade)
               </span>
             )}
           </div>
+
+          {/* ---- COST CHECK TAB ---- */}
+          {activeTab === 'cost' && diff.costDiff && (
+            <div className="settings-body">
+              <div className="settings-description" style={{ marginBottom: 12 }}>
+                Affaris pris i filen × förpackningsantal (PIM) jämfört med Shopifys <em>kostnad per artikel</em>.
+                Fel kostnad ger fel marginalrapporter och fel utpris om priset räknas om från Shopify.
+                {diff.costChecked != null && <> &nbsp;·&nbsp; {diff.costChecked} kontrollerade, <span style={{ color: diff.costDiff.length ? '#f59e0b' : 'inherit' }}>{diff.costDiff.length} avviker</span></>}
+              </div>
+              {diff.costDiff.length > 0 ? (
+                <>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table className="margin-table">
+                      <thead>
+                        <tr>
+                          <th><input type="checkbox" checked={costSelected.size === diff.costDiff.length} onChange={() => setCostSelected(costSelected.size === diff.costDiff.length ? new Set() : new Set(diff.costDiff.map(r => r.sku)))} /></th>
+                          <th>SKU</th>
+                          <th>Produkt</th>
+                          <th className="num">Affari/st</th>
+                          <th className="num">Förp.</th>
+                          <th className="num">Bör vara</th>
+                          <th className="num">Shopify nu</th>
+                          <th>Typ av fel</th>
+                          <th className="num">Pris nu</th>
+                          <th className="num">Pris vid 2,5×</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {diff.costDiff.map(row => (
+                          <tr key={row.sku} className={costSelected.has(row.sku) ? 'selected' : ''}>
+                            <td><input type="checkbox" checked={costSelected.has(row.sku)} onChange={() => setCostSelected(prev => { const n = new Set(prev); n.has(row.sku) ? n.delete(row.sku) : n.add(row.sku); return n; })} /></td>
+                            <td><code style={{ fontSize: 12 }}>{row.sku}</code></td>
+                            <td style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.productTitle || '—'}</td>
+                            <td className="num">{row.supplierUnitCost}</td>
+                            <td className="num">{row.pack > 1 ? `${row.pack}-pack` : '1'}</td>
+                            <td className="num"><strong>{row.expectedCost}</strong></td>
+                            <td className="num" style={{ color: '#ef4444' }}>{row.shopifyCost ?? '—'}</td>
+                            <td style={{ fontSize: 12 }}>{row.kind === 'missing' ? 'Kostnad saknas' : row.kind === 'unit-on-pack' ? 'Styckpris inlagt på pack' : row.kind === 'supplier-change' ? 'Affari har ändrat pris' : 'Fel kostnad'}</td>
+                            <td className="num">{row.price ?? '—'}</td>
+                            <td className="num" style={{ color: row.price != null && Math.abs(row.price - row.suggestedPrice) / row.suggestedPrice > 0.08 ? '#f59e0b' : 'inherit' }}>{row.suggestedPrice}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="bulk-bar" style={{ marginTop: 12 }}>
+                    <span style={{ fontSize: 13 }}>{costSelected.size} valda</span>
+                    <button className="btn btn-primary" onClick={handleApplyCost} disabled={!!loading || !costSelected.size}>
+                      {loading === 'apply-cost' ? <RefreshCw size={14} className="spin" /> : <CheckCircle2 size={14} />}
+                      {loading === 'apply-cost' ? 'Rättar...' : 'Rätta kostnad i Shopify (och PIM)'}
+                    </button>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary, #888)' }}>Ändrar bara kostnadsfältet – aldrig försäljningspriset. Kolumnen "Pris vid 2,5×" är ett underlag för prisöversynen.</span>
+                  </div>
+                </>
+              ) : (
+                <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-secondary, #888)' }}>
+                  Alla kontrollerade artiklar har rätt inköpspris i Shopify.
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ---- UPDATE STOCK TAB ---- */}
           {activeTab === 'update' && (

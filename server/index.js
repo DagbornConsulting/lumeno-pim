@@ -2414,6 +2414,55 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
 
     diff.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
+    // Cost check: supplier unit price (file) × pack_qty (PIM) vs Shopify's
+    // "cost per item". Flags missing cost, per-unit cost on a pack article,
+    // supplier price changes, and plain mismatches. Read-only here; fixing
+    // is a separate explicit action (/api/inventory/apply-cost).
+    const costDiff = [];
+    let costChecked = 0;
+    if (costCol) {
+      const packBySku = new Map(), pimCostBySku = new Map();
+      try {
+        for (let from = 0; ; from += 1000) {
+          const { data } = await supabase.from('products').select('sku, pack_qty, default_cost').eq('store_id', storeId).range(from, from + 999);
+          for (const p of data || []) if (p.sku) { packBySku.set(String(p.sku).trim(), p.pack_qty || 1); if (p.default_cost != null) pimCostBySku.set(String(p.sku).trim(), Number(p.default_cost)); }
+          if (!data || data.length < 1000) break;
+        }
+        for (let from = 0; ; from += 1000) {
+          const { data } = await supabase.from('variants').select('sku, pack_qty, cost').range(from, from + 999);
+          for (const v of data || []) if (v.sku) { if (v.pack_qty) packBySku.set(String(v.sku).trim(), v.pack_qty); if (v.cost != null && !pimCostBySku.has(String(v.sku).trim())) pimCostBySku.set(String(v.sku).trim(), Number(v.cost)); }
+          if (!data || data.length < 1000) break;
+        }
+      } catch (_) { /* pack_qty column missing → assume 1 */ }
+      let multiplier = 2.5;
+      try { multiplier = Number((await db.getPricingSettings(storeId))?.default_margin_multiplier) || 2.5; } catch (_) {}
+
+      for (const sku of skus) {
+        const variants = shop.get(sku);
+        if (!variants || variants.length !== 1) continue;
+        const v = variants[0];
+        const unit = csvRows[sku]?.cost;
+        if (unit == null || unit <= 0) continue;
+        costChecked++;
+        const pack = Math.max(1, Number(packBySku.get(sku)) || 1);
+        const expected = Math.round(unit * pack * 100) / 100;
+        const current = v.unitCost;
+        if (current != null && Math.abs(current - expected) <= 0.5) continue;
+        const pimCost = pimCostBySku.get(sku);
+        let kind = 'mismatch';
+        if (current == null) kind = 'missing';
+        else if (pack > 1 && Math.abs(current - unit) <= 0.5) kind = 'unit-on-pack';
+        else if (pimCost != null && Math.abs(pimCost - unit) > 0.5 && Math.abs(current - pimCost * pack) <= 0.5) kind = 'supplier-change';
+        costDiff.push({
+          sku, productTitle: v.productTitle || '', inventoryItemId: v.inventoryItemId,
+          supplierUnitCost: unit, pack, expectedCost: expected, shopifyCost: current, kind,
+          price: v.price, suggestedPrice: Math.round(expected * multiplier),
+        });
+      }
+      const sev = { missing: 0, 'unit-on-pack': 1, mismatch: 2, 'supplier-change': 3 };
+      costDiff.sort((a, b) => sev[a.kind] - sev[b.kind] || Math.abs((b.shopifyCost ?? 0) - b.expectedCost) - Math.abs((a.shopifyCost ?? 0) - a.expectedCost));
+    }
+
     // Split the "not in Shopify" SKUs into two buckets:
     //  - alreadyInPim: exist as products in this PIM store but aren't pushed yet
     //  - newProducts:  don't exist anywhere → candidates to create from CSV data
@@ -2469,6 +2518,8 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       resolvedSkuCol,
       resolvedQtyCol,
       supplierSnapshot,
+      costDiff: costCol ? costDiff : null,
+      costChecked,
       totalRows: parsed.totalRows,
       matched: diff.length,
       changed: diff.filter(r => r.changed).length,
@@ -2553,6 +2604,52 @@ app.post('/api/inventory/apply', async (req, res) => {
 // Shopify. Price is derived from the pricing engine: default_cost = CSV cost,
 // selling price = cost × margin (2.0 global default) unless an explicit price
 // is provided (which is stored as a per-product margin override).
+// Fix the "cost per item" in Shopify from the supplier file: cost per sold
+// article = supplier unit price × pack_qty. Mirrors the per-unit price into
+// PIM (variants.cost / products.default_cost). Never touches the sale price.
+app.post('/api/inventory/apply-cost', async (req, res) => {
+  try {
+    const { storeId, items } = req.body || {};
+    if (!storeId || !Array.isArray(items) || !items.length) return res.status(400).json({ error: 'storeId och items[] krävs' });
+    const store = await db.getStoreById(storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
+    const client = shopifySync.getClient(store);
+
+    let updated = 0;
+    const errors = [];
+    for (const it of items) {
+      const cost = Number(it.expectedCost);
+      if (!it.inventoryItemId || !Number.isFinite(cost) || cost <= 0) continue;
+      try {
+        const m = await client.graphql(`mutation($id: ID!, $input: InventoryItemInput!) {
+          inventoryItemUpdate(id: $id, input: $input) { inventoryItem { id unitCost { amount } } userErrors { field message } } }`,
+          { id: it.inventoryItemId, input: { cost: cost.toFixed(2) } });
+        const errs = m.inventoryItemUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+        updated++;
+        // PIM keeps the supplier's per-unit price as cost.
+        const unit = Number(it.supplierUnitCost);
+        if (it.sku && Number.isFinite(unit) && unit > 0) {
+          await supabase.from('variants').update({ cost: unit }).eq('sku', it.sku);
+          await supabase.from('products').update({ default_cost: unit }).eq('store_id', storeId).eq('sku', it.sku);
+        }
+      } catch (e) {
+        errors.push({ sku: it.sku, error: e.message });
+      }
+      await new Promise(r => setTimeout(r, 120)); // stay well under Shopify's rate limit
+    }
+    try {
+      await db.logActivity('cost_fix', 'store', storeId,
+        `Inköpspris rättat i Shopify för ${updated} artiklar från leverantörsfil${errors.length ? ` (${errors.length} misslyckades)` : ''}`,
+        { skus: items.slice(0, 200).map(i => i.sku), errors: errors.slice(0, 20), by: currentUserLabel(req) }, storeId);
+    } catch (_) {}
+    res.json({ updated, failed: errors.length, errors });
+  } catch (error) {
+    console.error('apply-cost error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/inventory/create-products', async (req, res) => {
   try {
     const { storeId, products } = req.body;

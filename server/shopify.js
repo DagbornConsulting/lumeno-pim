@@ -1380,7 +1380,7 @@ export const shopifySync = {
                 nodes {
                   title status
                   variants(first: 100) {
-                    nodes { sku inventoryQuantity inventoryItem { id tracked } }
+                    nodes { sku price inventoryQuantity inventoryItem { id tracked unitCost { amount } } }
                   }
                 }
                 pageInfo { hasNextPage endCursor }
@@ -1410,6 +1410,8 @@ export const shopifySync = {
             productStatus: p.status,
             currentQty: v.inventoryQuantity ?? 0,
             tracked: v.inventoryItem.tracked,
+            unitCost: v.inventoryItem.unitCost?.amount != null ? Number(v.inventoryItem.unitCost.amount) : null,
+            price: v.price != null ? Number(v.price) : null,
           });
         }
       }
