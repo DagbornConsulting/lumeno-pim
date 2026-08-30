@@ -282,3 +282,35 @@ export async function merchantPriceCompetitiveness({ merchantId }) {
       benchmark: micros(v.benchmarkPrice),
     }));
 }
+
+// Merchant API requires the GCP project (the service account's project) to be
+// registered with the Merchant Center account once. developerEmail must be a
+// user on the Merchant Center account (they get the API_DEVELOPER role).
+async function merchantAccountsCall(method, merchantId, path, body) {
+  const token = await getAccessToken();
+  const id = String(merchantId).replace(/[^0-9]/g, '');
+  let lastErr = null;
+  for (const version of ['v1', 'v1beta']) {
+    const res = await fetch(`${MERCHANT_API}/accounts/${version}/accounts/${id}/${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) return data;
+    lastErr = new Error(`Merchant API-fel (${res.status}): ${data.error?.message || 'okänt fel'}`);
+    if (res.status !== 404) throw lastErr; // 404 on v1 → try v1beta
+  }
+  throw lastErr;
+}
+
+export async function merchantRegisterGcp({ merchantId, developerEmail }) {
+  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+  if (!developerEmail) throw new Error('E-post för utvecklare saknas');
+  return merchantAccountsCall('POST', merchantId, 'developerRegistration:registerGcp', { developerEmail });
+}
+
+export async function merchantDeveloperRegistration({ merchantId }) {
+  if (!merchantId) throw new Error('Merchant Center account-id saknas');
+  return merchantAccountsCall('GET', merchantId, 'developerRegistration');
+}

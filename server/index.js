@@ -3041,6 +3041,29 @@ app.post('/api/price-watch/config', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// One-time: register the service account's GCP project with the Merchant
+// Center account (Merchant API refuses calls until this is done).
+app.post('/api/price-watch/register-gcp', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const merchantId = store.settings?.google?.merchant_id;
+    if (!merchantId) return res.status(400).json({ error: 'Merchant Center account-id ej konfigurerat' });
+    const developerEmail = String(req.body?.developerEmail || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(developerEmail)) return res.status(400).json({ error: 'Ange en giltig e-postadress (en användare på Merchant Center-kontot)' });
+    const result = await googleSeo.merchantRegisterGcp({ merchantId, developerEmail });
+    res.json({ ok: true, registration: result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/price-watch/register-gcp', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const merchantId = store.settings?.google?.merchant_id;
+    if (!merchantId) return res.status(400).json({ error: 'Merchant Center account-id ej konfigurerat' });
+    res.json({ ok: true, registration: await googleSeo.merchantDeveloperRegistration({ merchantId }) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Daily fetch on serverless hosts (Vercel Cron, see vercel.json "crons").
 // Vercel sends "Authorization: Bearer <CRON_SECRET>" when the CRON_SECRET env
 // var is set on the project. No session — guarded by the secret only.

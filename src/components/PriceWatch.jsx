@@ -47,7 +47,22 @@ export default function PriceWatch({ onOpenProduct }) {
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const [packResult, setPackResult] = useState(null);
+  const [devEmail, setDevEmail] = useState('');
+  const [registering, setRegistering] = useState(false);
   const fileRef = useRef(null);
+
+  const registerGcp = async () => {
+    setRegistering(true); setError(null); setNotice(null);
+    try {
+      const r = await fetch(`${API_URL}/price-watch/register-gcp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ developerEmail: devEmail.trim() }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Registrering misslyckades');
+      const ids = d.registration?.gcpIds || [];
+      setNotice(`GCP-projektet är registrerat mot Merchant Center${ids.length ? ` (${ids.join(', ')})` : ''}. Vänta ca 5 minuter och klicka sedan "Hämta från Merchant Center".`);
+    } catch (e) { setError(e.message); }
+    finally { setRegistering(false); }
+  };
+  const needsGcpRegistration = !!error && /not registered with the merchant account|registerGcp|register_as_a_developer/i.test(error);
 
   const loadStatus = useCallback(async () => {
     const r = await fetch(`${API_URL}/price-watch/status`);
@@ -185,6 +200,19 @@ export default function PriceWatch({ onOpenProduct }) {
       </div>
 
       {error && <div className="settings-section pw-error" style={{ padding: 12, fontSize: 13, color: '#b83a3a' }}>{error}</div>}
+      {(needsGcpRegistration || (showSettings && status?.credentials && status?.merchantId)) && (
+        <div className={`settings-section ${needsGcpRegistration ? 'pw-warn' : ''}`} style={{ padding: 16 }}>
+          <strong style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Info size={16} /> Registrera GCP-projektet mot Merchant Center (engångssteg)</strong>
+          <p className="pw-hint">
+            Merchant API kräver att service-kontots Google Cloud-projekt registreras på Merchant Center-kontot. Ange e-posten för en <em>användare på Merchant Center-kontot</em>
+            (t.ex. den du loggar in i Merchant Center med) – den får rollen API-utvecklare. Efter registreringen tar det ca 5 minuter innan hämtning fungerar.
+          </p>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <input className="form-input" style={{ width: 280 }} placeholder="namn@foretag.se" value={devEmail} onChange={e => setDevEmail(e.target.value)} />
+            <button className="btn btn-primary" disabled={registering || !devEmail.trim()} onClick={registerGcp}>{registering ? 'Registrerar…' : 'Registrera GCP-projekt'}</button>
+          </div>
+        </div>
+      )}
       {notice && <div className="settings-section" style={{ padding: 12, fontSize: 13, borderLeft: '3px solid #2f8f55' }}>{notice}</div>}
 
       {status?.migrationMissing && (
