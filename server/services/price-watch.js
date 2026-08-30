@@ -332,6 +332,38 @@ export async function underFloor({ storeId, limit = 20 }) {
     .slice(0, limit);
 }
 
+// Benchmark rows for one PIM product (matched by product_id or by any of its SKUs).
+export async function productRows({ storeId, productId, skus = [] }) {
+  const clean = [...new Set(skus.map(s => String(s || '').trim()).filter(s => s && !/[,()"]/.test(s)))];
+  const ors = [];
+  if (productId) ors.push(`product_id.eq.${productId}`);
+  if (clean.length) ors.push(`sku.in.(${clean.map(s => `"${s}"`).join(',')})`);
+  if (!ors.length) return [];
+  const { data, error } = await supabase.from('price_benchmarks').select('*').eq('store_id', storeId).or(ors.join(',')).limit(50);
+  if (error) throw new Error(error.message);
+  const rank = { 'RÖD': 0, 'BLÅ': 1, 'GUL': 2, 'OK': 3, 'GRÅ': 4 };
+  return (data || []).sort((a, b) => rank[a.price_status] - rank[b.price_status]);
+}
+
+// After a manual price change: update our_price on the matching rows and
+// recompute unit price / index / status so the alert reflects the new price
+// immediately (the nightly fetch will confirm it from Merchant Center).
+export async function applyPriceChange({ storeId, rowIds, price, settings }) {
+  if (!rowIds?.length) return [];
+  const { data: rows, error } = await supabase.from('price_benchmarks').select('*').eq('store_id', storeId).in('id', rowIds);
+  if (error) throw new Error(error.message);
+  const out = [];
+  for (const r of rows || []) {
+    const pack = Math.max(1, Number(r.pack_qty) || 1);
+    const { index, status } = computeStatus({ ourPrice: price, benchmark: num(r.benchmark_price), floor: num(r.floor_price), settings });
+    const patch = { our_price: round2(price), unit_price_ours: round2(price / pack), price_index: index, price_status: status };
+    const { data: upd, error: e2 } = await supabase.from('price_benchmarks').update(patch).eq('id', r.id).select().single();
+    if (e2) throw new Error(e2.message);
+    out.push(upd);
+  }
+  return out;
+}
+
 export async function summary(storeId) {
   const empty = { total: 0, withBenchmark: 0, coverage: 0, byStatus: {}, open: {}, acknowledged: 0, lastRun: null, packProducts: 0 };
   if (!supabase) return empty;

@@ -985,17 +985,22 @@ export const db = {
   // ACTIVITY LOG
   // ============================================
 
-  async logActivity(action, entityType, entityId, description, changes = null) {
-    if (!supabase) return; // Silent fail for logging
+  async logActivity(action, entityType, entityId, description, changes = null, storeId = null) {
+    if (!supabase) return; // Logging must never break the caller
 
-    await supabase.from('activity_log').insert({
+    // entity_id is a UUID column — anything else goes into `changes` instead.
+    const isUuid = typeof entityId === 'string' && /^[0-9a-f-]{36}$/i.test(entityId);
+    const { error } = await supabase.from('activity_log').insert({
+      store_id: storeId,
       action,
       entity_type: entityType,
-      entity_id: entityId,
+      entity_id: isUuid ? entityId : null,
       description,
-      changes,
-      actor_type: 'system'
+      changes: isUuid ? changes : { ...(changes || {}), entity_id: entityId },
     });
+    // (Previously inserted a non-existent `actor_type` column, so every log
+    // row silently failed and activity_log stayed empty.)
+    if (error) console.warn('activity_log insert failed:', error.message);
   },
 
   // ============================================

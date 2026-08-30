@@ -3155,6 +3155,81 @@ app.get('/api/price-watch/items', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Benchmark rows for one product (shown in the product popup).
+app.get('/api/price-watch/product/:productId', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const product = await db.getProductById(req.params.productId);
+    if (!product) return res.status(404).json({ error: 'Produkt hittades inte' });
+    const skus = [product.sku, ...(product.variants || []).map(v => v.sku)];
+    const rows = await priceWatch.productRows({ storeId: store.id, productId: product.id, skus });
+    res.json({ rows, settings: priceWatch.getSettings(store), merchantConfigured: !!store.settings?.google?.merchant_id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual price change from the product popup. This is the ONLY place in the
+// price-watch area that writes a price, and it only happens on an explicit
+// click: Shopify variant price → PIM variant/product price → benchmark row.
+app.post('/api/price-watch/set-price', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const { productId, sku, compareAtPrice, note } = req.body || {};
+    const price = Math.round(Number(req.body?.price));
+    if (!productId) return res.status(400).json({ error: 'productId saknas' });
+    if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: 'Ange ett pris i hela kronor' });
+    const cmp = compareAtPrice === undefined ? undefined : (compareAtPrice === null || compareAtPrice === '' ? null : Math.round(Number(compareAtPrice)));
+    if (cmp !== undefined && cmp !== null && (!Number.isFinite(cmp) || cmp <= price)) return res.status(400).json({ error: 'Jämförpriset måste vara högre än priset (eller tomt)' });
+
+    const product = await db.getProductById(productId);
+    if (!product) return res.status(404).json({ error: 'Produkt hittades inte' });
+    const { data: link } = await supabase.from('store_products').select('shopify_product_id')
+      .eq('store_id', store.id).eq('product_id', productId).maybeSingle();
+    const shopifyProductId = link?.shopify_product_id || product.shopify_product_id;
+    if (!shopifyProductId) return res.status(400).json({ error: 'Produkten är inte kopplad till Shopify' });
+
+    const client = shopifySync.getClient(store);
+    const gid = `gid://shopify/Product/${shopifyProductId}`;
+    const d = await client.graphql(`query($id: ID!) { product(id: $id) { id title variants(first: 100) { nodes { id sku price compareAtPrice title } } } }`, { id: gid });
+    const variants = d.product?.variants?.nodes || [];
+    if (!variants.length) return res.status(400).json({ error: 'Hittar inga varianter i Shopify' });
+    const wanted = String(sku || '').trim();
+    const targets = wanted ? variants.filter(v => String(v.sku || '').trim() === wanted) : (variants.length === 1 ? variants : []);
+    if (!targets.length) return res.status(400).json({ error: wanted ? `Varianten ${wanted} finns inte i Shopify` : 'Produkten har flera varianter – ange vilken (SKU)' });
+
+    const m = await client.graphql(`mutation($pid: ID!, $v: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $pid, variants: $v) { productVariants { id sku price compareAtPrice } userErrors { field message } } }`,
+      { pid: gid, v: targets.map(v => ({ id: v.id, price: price.toFixed(2), ...(cmp !== undefined ? { compareAtPrice: cmp === null ? null : cmp.toFixed(2) } : {}) })) });
+    const errs = m.productVariantsBulkUpdate?.userErrors || [];
+    if (errs.length) return res.status(400).json({ error: `Shopify: ${errs.map(e => e.message).join('; ')}` });
+
+    // Mirror into PIM so the popup and the catalogue agree with Shopify.
+    const targetSkus = targets.map(v => String(v.sku || '').trim()).filter(Boolean);
+    const pimPatch = { price, ...(cmp !== undefined ? { compare_at_price: cmp } : {}) };
+    if (targetSkus.length) await supabase.from('variants').update(pimPatch).eq('product_id', productId).in('sku', targetSkus);
+    if (targets.length === variants.length) {
+      await supabase.from('products').update({ default_price: price, ...(cmp !== undefined ? { default_compare_at_price: cmp } : {}) }).eq('id', productId);
+    }
+
+    // Recompute the benchmark rows for these variants.
+    const rows = await priceWatch.productRows({ storeId: store.id, productId, skus: targetSkus });
+    const targetIds = new Set(targets.map(v => v.id.split('/').pop()));
+    const affected = rows.filter(r => targetSkus.includes(String(r.sku || '').trim()) || [...targetIds].some(id => String(r.offer_id).endsWith(`_${id}`)));
+    const updatedRows = await priceWatch.applyPriceChange({ storeId: store.id, rowIds: affected.map(r => r.id), price, settings: priceWatch.getSettings(store) });
+
+    const from = targets.map(v => Number(v.price));
+    try {
+      await db.logActivity('price_change', 'product', productId,
+        `Pris ändrat ${from.join('/')} → ${price} kr på ${product.title}${targetSkus.length ? ` (${targetSkus.join(', ')})` : ''}${note ? ` – ${note}` : ''}`,
+        { from, to: price, compareAtPrice: cmp, skus: targetSkus, by: currentUserLabel(req), note: note || null });
+    } catch (_) {}
+
+    res.json({ ok: true, price, compareAtPrice: cmp, updated: targets.map((v, i) => ({ sku: v.sku, from: from[i], to: price })), rows: updatedRows });
+  } catch (e) {
+    console.error('set-price error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/price-watch/runs', async (req, res) => {
   try {
     const store = await priceWatchStore(req);

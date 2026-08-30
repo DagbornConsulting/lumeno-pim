@@ -5,8 +5,9 @@ import {
   X, Save, Sparkles, Loader2, Image, Plus, Trash2,
   Globe, Tag, Package, FileText, Search, AlertCircle,
   CheckCircle2, Truck, Settings, ShoppingBag, GripVertical,
-  Store, RefreshCw, MapPin, Megaphone, Link, Upload, FileCheck
+  Store, RefreshCw, MapPin, Megaphone, Link, Upload, FileCheck, Scale
 } from 'lucide-react';
+import ProductPriceWatch from './ProductPriceWatch';
 import { generateHandle } from '../data/demoData';
 import CategoryPicker from './CategoryPicker';
 import MetafieldsTab from './MetafieldsTab';
@@ -36,6 +37,29 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
     images: product.images || []
   });
   const [activeTab, setActiveTab] = useState('general');
+
+  // Prisbevakning: Merchant Center benchmark rows for this product (read-only
+  // until the user explicitly sets a price from the panel).
+  const [priceWatch, setPriceWatch] = useState(null);
+  const [priceWatchLoading, setPriceWatchLoading] = useState(false);
+  const loadPriceWatch = async () => {
+    if (!product?.id || String(product.id).startsWith('new-')) return;
+    setPriceWatchLoading(true);
+    try {
+      const r = await fetch(`${API_URL}/price-watch/product/${product.id}`);
+      if (r.ok) setPriceWatch(await r.json());
+    } catch (_) { /* ignore */ }
+    finally { setPriceWatchLoading(false); }
+  };
+  useEffect(() => { loadPriceWatch(); }, [product?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const priceWatchWorst = (() => {
+    const order = ['RÖD', 'BLÅ', 'GUL', 'OK', 'GRÅ'];
+    const rows = priceWatch?.rows || [];
+    const open = rows.filter(r => !r.acknowledged_at);
+    const pool = open.length ? open : rows;
+    return pool.map(r => r.price_status).sort((a, b) => order.indexOf(a) - order.indexOf(b))[0] || null;
+  })();
+  const priceWatchOpenAlerts = (priceWatch?.rows || []).filter(r => ['RÖD', 'BLÅ', 'GUL'].includes(r.price_status) && !r.acknowledged_at).length;
   const [isGenerating, setIsGenerating] = useState(false);
   const [generateOptions, setGenerateOptions] = useState({
     style: 'sales', language: 'sv', length: 'medium', includeSEO: true
@@ -537,6 +561,7 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
     { id: 'images', label: `Bilder (${editedProduct.images?.length || 0})`, icon: Image },
     { id: 'variants', label: 'Varianter', icon: Tag },
     { id: 'inventory', label: 'Lager', icon: Truck },
+    { id: 'price-watch', label: priceWatchOpenAlerts ? `Prisbevakning (${priceWatchOpenAlerts})` : 'Prisbevakning', icon: Scale },
     { id: 'seo', label: 'SEO', icon: Search },
     { id: 'schema', label: 'Schema', icon: FileText },
     { id: 'search-discovery', label: 'Sök & Upptäck', icon: Search },
@@ -568,6 +593,16 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
                 <span className={`status-pill ${editedProduct.status}`}>
                   {editedProduct.status === 'active' ? 'Aktiv' : 'Utkast'}
                 </span>
+                {priceWatchWorst && priceWatchWorst !== 'GRÅ' && (
+                  <span
+                    className={`pw-badge pw-${priceWatchWorst}`}
+                    style={{ cursor: 'pointer' }}
+                    title="Prisjämförelse mot marknaden – klicka för detaljer"
+                    onClick={() => setActiveTab('price-watch')}
+                  >
+                    <Scale size={11} /> {priceWatchWorst}{priceWatchOpenAlerts === 0 && ['RÖD', 'BLÅ', 'GUL'].includes(priceWatchWorst) ? ' · kvitterad' : ''}
+                  </span>
+                )}
                 {refreshing && (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-secondary, #888)' }}>
                     <RefreshCw size={12} className="spin" /> Hämtar från Shopify…
@@ -2232,6 +2267,28 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
           )}
 
           {/* Sync / Review Tab */}
+          {activeTab === 'price-watch' && (
+            <div className="tab-content">
+              <div className="form-section">
+                <h3 className="form-section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Scale size={16} /> Prisbevakning</h3>
+                <p className="form-section-description">Vårt pris mot marknadens (Googles benchmark för samma EAN). Här kan du kvittera varningen eller sätta ett nytt pris som skrivs direkt till Shopify.</p>
+                <ProductPriceWatch
+                  productId={product.id}
+                  data={priceWatch}
+                  loading={priceWatchLoading}
+                  onReload={loadPriceWatch}
+                  onPriceChanged={({ sku, price, compareAtPrice }) => {
+                    setEditedProduct(prev => {
+                      const variants = (prev.variants || []).map(v => (!sku || v.sku === sku) ? { ...v, price, ...(compareAtPrice !== undefined ? { compareAtPrice } : {}) } : v);
+                      const all = !sku || variants.every(v => v.price === price);
+                      return { ...prev, variants, ...(all ? { price, ...(compareAtPrice !== undefined ? { compareAtPrice } : {}) } : {}) };
+                    });
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           {activeTab === 'sync' && (
             <div className="tab-content">
               {stores?.[0]?.id ? (
