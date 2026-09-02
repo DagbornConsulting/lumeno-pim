@@ -3205,13 +3205,24 @@ const cronAuthorized = (req) => {
 app.get('/api/cron/shopify-pull', async (req, res) => {
   if (!cronAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
   if (!isDbConfigured()) return res.status(503).json({ error: 'Databas ej konfigurerad' });
+  // Vercel kills the function at maxDuration (60s), which used to truncate the
+  // import mid-loop (~40 products/night). Budget the time instead: the import
+  // stops cleanly, and the content/collection pulls only run when time remains
+  // — they get their turn on nights without an import backlog.
+  const startedAt = Date.now();
+  const deadlineMs = startedAt + 40_000;
   const results = [];
   for (const store of (await db.getStores()) || []) {
     if (!store.access_token) continue;
     const r = { store: store.name };
-    try { r.newProducts = await importNewProductsFromShopify(store); } catch (e) { r.newProductsError = e.message; }
-    try { r.pull = await pullAllFromShopify(store); } catch (e) { r.pullError = e.message; }
-    try { r.collections = await pullCollectionsFromShopify(store); } catch (e) { r.collectionsError = e.message; }
+    try { r.newProducts = await importNewProductsFromShopify(store, { deadlineMs }); } catch (e) { r.newProductsError = e.message; }
+    if (Date.now() < deadlineMs) {
+      try { r.pull = await pullAllFromShopify(store); } catch (e) { r.pullError = e.message; }
+    } else r.pullSkipped = 'tidsbudget slut';
+    if (Date.now() < deadlineMs + 5_000) {
+      try { r.collections = await pullCollectionsFromShopify(store); } catch (e) { r.collectionsError = e.message; }
+    } else r.collectionsSkipped = 'tidsbudget slut';
+    r.elapsedMs = Date.now() - startedAt;
     console.log(`🔄 Cron Shopify→PIM ${store.name}:`, JSON.stringify(r));
     results.push(r);
   }
@@ -5675,7 +5686,10 @@ async function importOneShopifyProduct(store, shopifyId) {
 // Find and import Shopify products that are GENUINELY new to the PIM (none of
 // their variant SKUs exist in the PIM). Matches by SKU — not product id — so the
 // PIM's grouped multi-variant products aren't re-imported as duplicates.
-async function importNewProductsFromShopify(store) {
+// deadlineMs: stop importing cleanly when Date.now() passes it (serverless
+// time limits) — the next run continues where this one stopped, since matching
+// is by SKU/link and already-imported products are skipped.
+async function importNewProductsFromShopify(store, { deadlineMs = null } = {}) {
   const client = shopifySync.getClient(store);
 
   // PIM SKU set + already-linked Shopify ids.
@@ -5710,14 +5724,15 @@ async function importNewProductsFromShopify(store) {
     cursor = d.products.pageInfo.endCursor;
   }
 
-  let imported = 0, failed = 0;
+  let imported = 0, failed = 0, stoppedEarly = false;
   const errors = [];
   for (const id of newIds) {
+    if (deadlineMs && Date.now() > deadlineMs) { stoppedEarly = true; break; }
     try { await importOneShopifyProduct(store, id); imported++; }
     catch (e) { failed++; errors.push({ id, error: e.message }); }
-    await sleep(150);
+    await sleep(50);
   }
-  return { candidates: newIds.length, imported, failed, errors: errors.slice(0, 20) };
+  return { candidates: newIds.length, imported, failed, stoppedEarly, errors: errors.slice(0, 20) };
 }
 
 // POST /api/shopify/stores/:storeId/import-new — import all genuinely-new
