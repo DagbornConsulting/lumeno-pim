@@ -21,6 +21,7 @@ export function transformDbProduct(p) {
     supplierId: p.supplier_id,
     sku: p.sku || '',
     barcode: p.barcode || '',
+    packQty: p.pack_qty || 1,
     seoTitle: p.seo_title || '',
     seoDescription: p.seo_description || '',
     chargeTax: p.charge_tax ?? true,

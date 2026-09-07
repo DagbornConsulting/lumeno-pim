@@ -14,7 +14,7 @@ import MetafieldsTab from './MetafieldsTab';
 import SyncReview from './SyncReview';
 import {
   resolveMargin, computePricing, fmtKr, fmtPct,
-  DEFAULT_MARGIN, DEFAULT_VAT_RATE,
+  DEFAULT_MARGIN, DEFAULT_VAT_RATE, DEFAULT_SUPPLIER_FEE_PERCENT,
 } from '../utils/pricing';
 import { matchCategoryId } from '../lib/taxonomyMatch';
 
@@ -744,7 +744,8 @@ export default function ProductDetail({ product, stores, onSave, onDelete, onClo
                   const pricing = computePricing({
                     cost: editedProduct.cost,
                     margin: margin.value,
-                    supplierFeePercent: supplier?.supplier_fee_percent ?? 0,
+                    packQty: editedProduct.packQty,
+                    supplierFeePercent: supplier?.supplier_fee_percent ?? DEFAULT_SUPPLIER_FEE_PERCENT,
                     vatRate: pricingCtx.settings?.default_vat_rate ?? DEFAULT_VAT_RATE,
                   });
                   return (

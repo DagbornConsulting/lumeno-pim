@@ -3,6 +3,8 @@
 
 export const DEFAULT_MARGIN = 2.0;
 export const DEFAULT_VAT_RATE = 0.25;
+// Affari's dropship handling fee — used when no supplier profile says otherwise.
+export const DEFAULT_SUPPLIER_FEE_PERCENT = 20;
 
 const round2 = n => Math.round(n * 100) / 100;
 const round4 = n => Math.round(n * 10000) / 10000;
@@ -35,9 +37,12 @@ export function resolveMargin({ product, categoryRules = [], supplier = null, de
 }
 
 // Compute all derived prices/profit numbers from cost + margin + fees + VAT.
-// cost is excl. VAT (supplier price). Sale price returned both incl. and excl. VAT.
-export function computePricing({ cost, margin, supplierFeePercent = 0, vatRate = DEFAULT_VAT_RATE }) {
-  const c = Number(cost) || 0;
+// cost is the supplier's PER-UNIT price excl. VAT; packQty is how many units
+// the customer gets per sold article ("Förpackningsantal dropship"), so both
+// the sale price and the cost basis scale with it.
+export function computePricing({ cost, margin, packQty = 1, supplierFeePercent = 0, vatRate = DEFAULT_VAT_RATE }) {
+  const pack = Math.max(1, Number(packQty) || 1);
+  const c = (Number(cost) || 0) * pack;
   const m = Number(margin) || 0;
   const fee = Number(supplierFeePercent) || 0;
   const vat = Number(vatRate);
@@ -72,7 +77,8 @@ export function priceProduct({ product, categoryRules, supplier, settings }) {
   const pricing = computePricing({
     cost: product?.default_cost,
     margin: margin.value,
-    supplierFeePercent: supplier?.supplier_fee_percent ?? 0,
+    packQty: product?.pack_qty,
+    supplierFeePercent: supplier?.supplier_fee_percent ?? DEFAULT_SUPPLIER_FEE_PERCENT,
     vatRate: settings?.default_vat_rate ?? DEFAULT_VAT_RATE,
   });
   return { margin, pricing };

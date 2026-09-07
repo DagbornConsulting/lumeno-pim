@@ -3,7 +3,7 @@ import {
   TrendingUp, Save, Plus, Trash2, RefreshCw, Search, AlertCircle, CheckCircle2
 } from 'lucide-react';
 import {
-  resolveMargin, computePricing, fmtKr, fmtPct, DEFAULT_MARGIN, DEFAULT_VAT_RATE
+  resolveMargin, computePricing, fmtKr, fmtPct, DEFAULT_MARGIN, DEFAULT_VAT_RATE, DEFAULT_SUPPLIER_FEE_PERCENT
 } from '../utils/pricing';
 import './MarginEngine.css';
 
@@ -197,7 +197,8 @@ export default function MarginEngine() {
       const pricing = computePricing({
         cost: p.default_cost,
         margin: margin.value,
-        supplierFeePercent: supplier?.supplier_fee_percent ?? 0,
+        packQty: p.pack_qty,
+        supplierFeePercent: supplier?.supplier_fee_percent ?? DEFAULT_SUPPLIER_FEE_PERCENT,
         vatRate: settings.default_vat_rate,
       });
       return { product: p, margin, pricing, supplier };
@@ -435,7 +436,8 @@ export default function MarginEngine() {
                 </th>
                 <th>Produkt</th>
                 <th>Kategori</th>
-                <th className="num">Inköp</th>
+                <th className="num">Inköp/st</th>
+                <th className="num" title="Förpackningsantal – kunden köper hela förpackningen, pris och kostnad räknas × antal">Förp.</th>
                 <th>Marginal</th>
                 <th className="num">Utpris ink</th>
                 <th className="num">Faktisk kost</th>
@@ -459,6 +461,7 @@ export default function MarginEngine() {
                   </td>
                   <td>{p.product_type || <span className="muted">—</span>}</td>
                   <td className="num">{p.default_cost ? fmtKr(p.default_cost) : <span className="muted">—</span>}</td>
+                  <td className="num">{p.pack_qty > 1 ? `${p.pack_qty}-pack` : <span className="muted">1</span>}</td>
                   <td>
                     <span className={`margin-badge source-${margin.source}`}>
                       {margin.value.toFixed(2)}×
@@ -474,7 +477,7 @@ export default function MarginEngine() {
                 </tr>
               ))}
               {!filteredRows.length && (
-                <tr><td colSpan={9} className="muted" style={{ textAlign: 'center', padding: 24 }}>
+                <tr><td colSpan={10} className="muted" style={{ textAlign: 'center', padding: 24 }}>
                   Inga produkter matchar
                 </td></tr>
               )}

@@ -941,7 +941,8 @@ export const db = {
     const pricing = computePricing({
       cost: product.default_cost,
       margin: margin.value,
-      supplierFeePercent: supplier?.supplier_fee_percent ?? 0,
+      packQty: product.pack_qty,
+      supplierFeePercent: supplier?.supplier_fee_percent ?? 20, // Affari default
       vatRate: settings?.default_vat_rate,
     });
 
