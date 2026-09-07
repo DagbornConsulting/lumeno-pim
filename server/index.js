@@ -3634,6 +3634,98 @@ app.get('/api/dashboard/sales', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Sales page: orders with profit per order and per product.
+// Profit model (per order):
+//   intäkt ex moms  = (subtotal + fraktintäkt) / (1 + moms)
+//   inköp           = Σ rad.antal × (kostnad per styck × förpackningsantal)
+//   Affari-avgift   = inköp × handling_fee (20 %)
+//   Affari-frakt    = freight_fee (79 kr) när inköpsvärdet < freight_threshold (700 kr)
+//   vinst           = intäkt ex moms − inköp − avgift − frakt
+// Costs come from PIM (variant/product cost = Affari's unit price, × pack_qty).
+app.get('/api/sales/report', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!store.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
+    const days = Math.max(1, Math.min(365, parseInt(req.query.days) || 30));
+    const s = priceWatch.getSettings(store);
+    const { orders, since, fetchedAt } = await shopifySales.getOrders(store, { days, force: req.query.refresh === '1' });
+
+    // Cost basis per SKU from PIM (unit cost × pack).
+    const all = async (t, sel, f) => { const out = []; for (let i = 0; ; i += 1000) { let q = supabase.from(t).select(sel).range(i, i + 999); if (f) q = f(q); const { data, error } = await q; if (error) throw new Error(`${t}: ${error.message}`); out.push(...(data || [])); if (!data || data.length < 1000) break; } return out; };
+    const prods = await all('products', 'id, sku, default_cost, pack_qty', q => q.eq('store_id', store.id));
+    const prodIds = new Set(prods.map(p => p.id));
+    const vars = (await all('variants', 'product_id, sku, cost, pack_qty')).filter(v => prodIds.has(v.product_id));
+    const prodById = new Map(prods.map(p => [p.id, p]));
+    const costBySku = new Map();
+    for (const p of prods) if (p.sku && p.default_cost != null) costBySku.set(String(p.sku).trim(), Number(p.default_cost) * Math.max(1, p.pack_qty || 1));
+    for (const v of vars) {
+      if (!v.sku) continue;
+      const p = prodById.get(v.product_id);
+      const unit = v.cost ?? p?.default_cost;
+      if (unit != null) costBySku.set(String(v.sku).trim(), Number(unit) * Math.max(1, Number(v.pack_qty ?? p?.pack_qty) || 1));
+    }
+    const pimProductBySku = new Map();
+    for (const p of prods) if (p.sku) pimProductBySku.set(String(p.sku).trim(), p.id);
+    for (const v of vars) if (v.sku && !pimProductBySku.has(String(v.sku).trim())) pimProductBySku.set(String(v.sku).trim(), v.product_id);
+
+    const vatMul = 1 + s.vat;
+    const r2 = n => Math.round(n * 100) / 100;
+    const perProduct = new Map();
+    const outOrders = [];
+    const totals = { orders: 0, revenue: 0, revenueExVat: 0, purchase: 0, fee: 0, freight: 0, profit: 0, unitsMissingCost: 0 };
+
+    for (const o of orders) {
+      if (o.cancelled) continue;
+      let purchase = 0, missing = 0;
+      const lines = o.lines.map(li => {
+        const costArt = costBySku.get(li.sku);
+        const lineCost = costArt != null ? costArt * li.qty : null;
+        if (lineCost != null) purchase += lineCost; else missing += li.qty;
+        const lineExVat = li.lineTotal / vatMul;
+        const fee = lineCost != null ? lineCost * s.handling_fee : null;
+        const profit = lineCost != null ? lineExVat - lineCost - fee : null;
+        // per-product aggregation (freight excluded — it is per order)
+        const key = li.sku || `(utan sku) ${li.title}`;
+        const agg = perProduct.get(key) || { sku: li.sku, title: li.title, productId: pimProductBySku.get(li.sku) || null, units: 0, revenue: 0, revenueExVat: 0, purchase: 0, fee: 0, profit: 0, missingCost: costArt == null };
+        agg.units += li.qty; agg.revenue += li.lineTotal; agg.revenueExVat += lineExVat;
+        if (lineCost != null) { agg.purchase += lineCost; agg.fee += fee; agg.profit += profit; } else agg.missingCost = true;
+        perProduct.set(key, agg);
+        return { ...li, costPerArticle: costArt ?? null, lineCost: lineCost != null ? r2(lineCost) : null, lineExVat: r2(lineExVat), fee: fee != null ? r2(fee) : null, profit: profit != null ? r2(profit) : null };
+      });
+      const revenue = o.subtotal + o.shipping; // incl. VAT, customer side
+      const revenueExVat = revenue / vatMul;
+      const fee = purchase * s.handling_fee;
+      const freight = purchase > 0 && purchase < s.freight_threshold ? s.freight_fee : 0;
+      const profit = missing ? null : revenueExVat - purchase - fee - freight;
+      totals.orders++; totals.revenue += revenue; totals.revenueExVat += revenueExVat;
+      totals.purchase += purchase; totals.fee += fee; totals.freight += freight;
+      if (profit != null) totals.profit += profit;
+      totals.unitsMissingCost += missing;
+      outOrders.push({
+        id: o.id, name: o.name, createdAt: o.createdAt, financial: o.financial, fulfillment: o.fulfillment,
+        total: o.total, shipping: o.shipping, revenueExVat: r2(revenueExVat),
+        purchase: r2(purchase), fee: r2(fee), freight, profit: profit != null ? r2(profit) : null,
+        margin: profit != null && revenueExVat > 0 ? r2(profit / revenueExVat) : null,
+        missingCostUnits: missing, lines,
+      });
+    }
+    const products = [...perProduct.values()].map(a => ({
+      ...a, revenue: r2(a.revenue), revenueExVat: r2(a.revenueExVat), purchase: r2(a.purchase), fee: r2(a.fee),
+      profit: a.missingCost ? null : r2(a.profit), margin: !a.missingCost && a.revenueExVat > 0 ? r2(a.profit / a.revenueExVat) : null,
+    })).sort((a, b) => (b.profit ?? -1e9) - (a.profit ?? -1e9));
+
+    res.json({
+      days, since, fetchedAt,
+      settings: { vat: s.vat, handling_fee: s.handling_fee, freight_fee: s.freight_fee, freight_threshold: s.freight_threshold },
+      totals: { ...Object.fromEntries(Object.entries(totals).map(([k, v]) => [k, r2(v)])), margin: totals.revenueExVat > 0 ? r2(totals.profit / totals.revenueExVat) : null, avgOrder: totals.orders ? r2(totals.revenue / totals.orders) : 0 },
+      orders: outOrders, products,
+    });
+  } catch (e) {
+    console.error('sales report error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Merchant Center: disapprovals + top issue groups (Merchant API, cached).
 app.get('/api/dashboard/merchant', async (req, res) => {
   try {

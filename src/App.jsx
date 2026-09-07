@@ -22,6 +22,7 @@ import StagingProducts from './components/StagingProducts';
 import SeoInsights from './components/SeoInsights';
 import PriceWatch from './components/PriceWatch';
 import Dashboard from './components/Dashboard';
+import SalesView from './components/SalesView';
 import ShopifyImport from './components/ShopifyImport';
 import { transformDbProduct } from './lib/transformProduct';
 import StoreManager from './components/StoreManager';
@@ -779,6 +780,14 @@ export default function App() {
             <LayoutDashboard size={20} />
             <span className="nav-label">Översikt</span>
           </div>
+          <div
+            className={`nav-item ${activeView === 'sales' ? 'active' : ''}`}
+            onClick={() => setActiveView('sales')}
+            style={{ paddingLeft: 32 }}
+          >
+            <ShoppingBag size={18} />
+            <span className="nav-label">Försäljning</span>
+          </div>
         </nav>
 
         <nav className="nav-section">
@@ -1004,6 +1013,17 @@ export default function App() {
           {activeView === 'dashboard' && (
             <Dashboard
               onNavigate={setActiveView}
+              onOpenProduct={async (id) => {
+                try {
+                  const r = await fetch(`${API_URL}/db/products/${id}`);
+                  if (r.ok) setSelectedProductForEdit(transformDbProduct(await r.json()));
+                } catch (_) { /* ignore */ }
+              }}
+            />
+          )}
+
+          {activeView === 'sales' && (
+            <SalesView
               onOpenProduct={async (id) => {
                 try {
                   const r = await fetch(`${API_URL}/db/products/${id}`);

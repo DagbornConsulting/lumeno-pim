@@ -28,7 +28,10 @@ export const DEFAULT_SETTINGS = {
   high: 1.20,           // index above → RÖD (with room) / GUL
   warn: 1.10,           // index at/above → GUL
   low: 0.90,            // index below → BLÅ
+  freight_fee: 79,      // SEK Affari charges per dropship order...
+  freight_threshold: 700, // ...when the order's purchase value is below this
 };
+const SETTING_MAX = { freight_fee: 1000, freight_threshold: 20000 };
 export const STATUSES = ['RÖD', 'BLÅ', 'GUL', 'OK', 'GRÅ'];
 const ALERT_STATUSES = ['RÖD', 'BLÅ', 'GUL'];
 
@@ -40,7 +43,7 @@ export function sanitizeSettings(raw = {}) {
   const out = {};
   for (const k of Object.keys(DEFAULT_SETTINGS)) {
     const v = Number(raw[k]);
-    if (Number.isFinite(v) && v >= 0 && v < 10) out[k] = v;
+    if (Number.isFinite(v) && v >= 0 && v < (SETTING_MAX[k] ?? 10)) out[k] = v;
   }
   return out;
 }

@@ -73,3 +73,51 @@ export async function getSales(store, { days = 30, force = false } = {}) {
   _cache.set(key, { at: Date.now(), data });
   return data;
 }
+
+// Full order list with line items for the sales page. Cached like getSales.
+export async function getOrders(store, { days = 30, force = false } = {}) {
+  const key = `orders:${store.id}:${days}`;
+  const hit = _cache.get(key);
+  if (!force && hit && Date.now() - hit.at < TTL) return hit.data;
+
+  const client = shopifySync.getClient(store);
+  const since = new Date(Date.now() - days * 864e5);
+  const query = `query($c: String, $q: String) {
+    orders(first: 100, after: $c, query: $q, sortKey: CREATED_AT, reverse: true) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id name createdAt cancelledAt displayFinancialStatus displayFulfillmentStatus
+        currentSubtotalPriceSet { shopMoney { amount } }
+        currentTotalPriceSet { shopMoney { amount } }
+        totalShippingPriceSet { shopMoney { amount } }
+        lineItems(first: 100) { nodes { sku title quantity discountedTotalSet { shopMoney { amount } } product { id } } }
+      }
+    }
+  }`;
+  const orders = [];
+  let cursor = null;
+  for (let page = 0; page < 60; page++) {
+    let d;
+    try { d = await client.graphql(query, { c: cursor, q: `created_at:>=${ymd(since)}` }); }
+    catch (e) { if (/access denied|read_orders|ACCESS_DENIED/i.test(e.message)) throw new Error('Shopify-appen saknar behörigheten read_orders'); throw e; }
+    for (const o of d.orders.nodes) {
+      orders.push({
+        id: o.id.split('/').pop(), name: o.name, createdAt: o.createdAt, cancelled: !!o.cancelledAt,
+        financial: o.displayFinancialStatus, fulfillment: o.displayFulfillmentStatus,
+        subtotal: Number(o.currentSubtotalPriceSet?.shopMoney?.amount || 0),
+        total: Number(o.currentTotalPriceSet?.shopMoney?.amount || 0),
+        shipping: Number(o.totalShippingPriceSet?.shopMoney?.amount || 0),
+        lines: o.lineItems.nodes.map(li => ({
+          sku: String(li.sku || '').trim(), title: li.title, qty: Number(li.quantity || 0),
+          lineTotal: Number(li.discountedTotalSet?.shopMoney?.amount || 0),
+          shopifyProductId: li.product?.id ? li.product.id.split('/').pop() : null,
+        })),
+      });
+    }
+    if (!d.orders.pageInfo.hasNextPage) break;
+    cursor = d.orders.pageInfo.endCursor;
+  }
+  const data = { days, since: ymd(since), fetchedAt: new Date().toISOString(), orders };
+  _cache.set(key, { at: Date.now(), data });
+  return data;
+}

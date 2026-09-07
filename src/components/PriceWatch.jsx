@@ -30,6 +30,8 @@ const SETTING_FIELDS = [
   { key: 'warn', label: 'Index för GUL (från)', pct: false },
   { key: 'low', label: 'Index för BLÅ (under)', pct: false },
   { key: 'ack_threshold', label: 'Väck kvitterad varning vid benchmark-rörelse (%)', pct: true },
+  { key: 'freight_fee', label: 'Affari-frakt per order (kr)', pct: false, hint: 'Används på Försäljnings-sidan' },
+  { key: 'freight_threshold', label: 'Affari-frakt under inköpsvärde (kr)', pct: false },
 ];
 
 export default function PriceWatch({ onOpenProduct }) {
