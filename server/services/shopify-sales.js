@@ -90,7 +90,7 @@ export async function getOrders(store, { days = 30, force = false } = {}) {
         currentSubtotalPriceSet { shopMoney { amount } }
         currentTotalPriceSet { shopMoney { amount } }
         totalShippingPriceSet { shopMoney { amount } }
-        lineItems(first: 100) { nodes { sku title quantity discountedTotalSet { shopMoney { amount } } product { id } } }
+        lineItems(first: 100) { nodes { sku title quantity discountedTotalSet { shopMoney { amount } } discountAllocations { allocatedAmountSet { shopMoney { amount } } } product { id } } }
       }
     }
   }`;
@@ -107,11 +107,19 @@ export async function getOrders(store, { days = 30, force = false } = {}) {
         subtotal: Number(o.currentSubtotalPriceSet?.shopMoney?.amount || 0),
         total: Number(o.currentTotalPriceSet?.shopMoney?.amount || 0),
         shipping: Number(o.totalShippingPriceSet?.shopMoney?.amount || 0),
-        lines: o.lineItems.nodes.map(li => ({
-          sku: String(li.sku || '').trim(), title: li.title, qty: Number(li.quantity || 0),
-          lineTotal: Number(li.discountedTotalSet?.shopMoney?.amount || 0),
-          shopifyProductId: li.product?.id ? li.product.id.split('/').pop() : null,
-        })),
+        lines: o.lineItems.nodes.map(li => {
+          // discountedTotalSet only reflects LINE-level discounts; order-level
+          // discount codes (e.g. VALKOMMEN10) sit in discountAllocations.
+          // Subtract them so line revenue matches what the customer paid.
+          const gross = Number(li.discountedTotalSet?.shopMoney?.amount || 0);
+          const allocated = (li.discountAllocations || []).reduce((a, x) => a + Number(x.allocatedAmountSet?.shopMoney?.amount || 0), 0);
+          return {
+            sku: String(li.sku || '').trim(), title: li.title, qty: Number(li.quantity || 0),
+            lineTotal: Math.round((gross - allocated) * 100) / 100,
+            discount: Math.round(allocated * 100) / 100,
+            shopifyProductId: li.product?.id ? li.product.id.split('/').pop() : null,
+          };
+        }),
       });
     }
     if (!d.orders.pageInfo.hasNextPage) break;
