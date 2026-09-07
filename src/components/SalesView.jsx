@@ -42,7 +42,7 @@ export default function SalesView({ onOpenProduct }) {
         <div>
           <h1 style={{ display: 'flex', alignItems: 'center', gap: 10 }}><ShoppingBag size={22} /> Försäljning</h1>
           <div className="pw-sub" style={{ marginTop: 4 }}>
-            Ordrar från Shopify med vinst per order och produkt. Vinst = intäkt ex moms − inköp × förp. − Affari-avgift {s ? pct(s.handling_fee) : '20 %'} − Affari-frakt {s ? kr(s.freight_fee) : '79 kr'} när inköpsvärdet är under {s ? kr(s.freight_threshold) : '700 kr'}.
+            Ordrar från Shopify med vinst per order och produkt. Vinst = intäkt ex moms − inköp × förp. − Affari-avgift {s ? pct(s.handling_fee) : '20 %'} − Affari-frakt {s ? kr(s.freight_fee) : '79 kr'} (under {s ? kr(s.freight_threshold) : '700 kr'} i inköp) − faktiska transaktionsavgifter (Klarna/kort).
           </div>
         </div>
         <div className="actions">
@@ -65,7 +65,7 @@ export default function SalesView({ onOpenProduct }) {
             <div className="pw-tile"><div className="pw-tile-label"><ShoppingBag size={13} /> Omsättning</div><div className="pw-tile-value">{kr(t.revenue)}</div><div className="pw-tile-sub">{t.orders} ordrar · snitt {kr(t.avgOrder)}</div></div>
             <div className="pw-tile"><div className="pw-tile-label">Intäkt ex moms</div><div className="pw-tile-value">{kr(t.revenueExVat)}</div><div className="pw-tile-sub">moms {pct(s.vat)}</div></div>
             <div className="pw-tile"><div className="pw-tile-label">Inköp + avgift</div><div className="pw-tile-value">{kr(t.purchase + t.fee)}</div><div className="pw-tile-sub">inköp {kr(t.purchase)} · avgift {kr(t.fee)}</div></div>
-            <div className="pw-tile"><div className="pw-tile-label"><Truck size={13} /> Affari-frakt</div><div className="pw-tile-value">{kr(t.freight)}</div><div className="pw-tile-sub">{s ? `${kr(s.freight_fee)} per order under ${kr(s.freight_threshold)} i inköp` : ''}</div></div>
+            <div className="pw-tile"><div className="pw-tile-label"><Truck size={13} /> Frakt & transaktioner</div><div className="pw-tile-value">{kr((t.freight || 0) + (t.txFees || 0))}</div><div className="pw-tile-sub">Affari-frakt {kr(t.freight)} · betalavgifter {kr(t.txFees)}</div></div>
             <div className="pw-tile" style={{ borderLeft: `3px solid ${profitColor(t.profit)}` }}><div className="pw-tile-label"><TrendingUp size={13} /> Bruttovinst</div><div className="pw-tile-value" style={{ color: profitColor(t.profit) }}>{kr(t.profit)}</div><div className="pw-tile-sub"><Percent size={11} /> marginal {pct(t.margin)}</div></div>
           </div>
 
@@ -90,6 +90,7 @@ export default function SalesView({ onOpenProduct }) {
                       <th>Order</th><th>Datum</th><th>Status</th>
                       <th className="num">Totalt</th><th className="num">Frakt (kund)</th>
                       <th className="num">Inköp</th><th className="num">Avgift 20 %</th><th className="num">Affari-frakt</th>
+                      <th className="num" title="Faktisk avgift från Shopify Payments/Klarna">Trans.avgift</th>
                       <th className="num">Vinst</th><th className="num">Marginal</th>
                     </tr>
                   </thead>
@@ -106,12 +107,13 @@ export default function SalesView({ onOpenProduct }) {
                           <td className="num">{kr2(o.purchase)}</td>
                           <td className="num">{kr2(o.fee)}</td>
                           <td className="num">{o.freight ? kr2(o.freight) : '–'}</td>
+                          <td className="num" title={o.paymentRate || ''}>{o.txFees ? kr2(o.txFees) : '–'}</td>
                           <td className="num" style={{ color: profitColor(o.profit), fontWeight: 600 }}>{kr2(o.profit)}</td>
                           <td className="num">{pct(o.margin)}</td>
                         </tr>,
                         open && (
                           <tr key={`${o.id}-d`}>
-                            <td colSpan={10} style={{ background: 'var(--bg-sunken, #f0ede8)' }}>
+                            <td colSpan={11} style={{ background: 'var(--bg-sunken, #f0ede8)' }}>
                               <table className="margin-table" style={{ margin: '4px 0' }}>
                                 <thead><tr><th>Produkt</th><th className="num">Antal</th><th className="num">Radbelopp</th><th className="num">Ex moms</th><th className="num">Inköp/artikel</th><th className="num">Avgift</th><th className="num">Vinst</th></tr></thead>
                                 <tbody>
@@ -128,7 +130,7 @@ export default function SalesView({ onOpenProduct }) {
                                   ))}
                                 </tbody>
                               </table>
-                              <div className="pw-sub" style={{ padding: '2px 8px 8px' }}>Affari-frakten ({o.freight ? kr(o.freight) : '0 kr'}) ligger på ordernivå och ingår inte i radernas vinst.</div>
+                              <div className="pw-sub" style={{ padding: '2px 8px 8px' }}>Affari-frakt ({o.freight ? kr(o.freight) : '0 kr'}) och transaktionsavgift ({kr2(o.txFees)}{o.paymentRate ? `, ${o.paymentRate}` : ''}) ligger på ordernivå och ingår inte i radernas vinst.</div>
                             </td>
                           </tr>
                         ),

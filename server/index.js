@@ -3696,15 +3696,16 @@ app.get('/api/sales/report', async (req, res) => {
       const revenueExVat = revenue / vatMul;
       const fee = purchase * s.handling_fee;
       const freight = purchase > 0 && purchase < s.freight_threshold ? s.freight_fee : 0;
-      const profit = missing ? null : revenueExVat - purchase - fee - freight;
+      const txFees = o.txFees || 0; // actual Shopify Payments/Klarna fees (no VAT on these)
+      const profit = missing ? null : revenueExVat - purchase - fee - freight - txFees;
       totals.orders++; totals.revenue += revenue; totals.revenueExVat += revenueExVat;
-      totals.purchase += purchase; totals.fee += fee; totals.freight += freight;
+      totals.purchase += purchase; totals.fee += fee; totals.freight += freight; totals.txFees = (totals.txFees || 0) + txFees;
       if (profit != null) totals.profit += profit;
       totals.unitsMissingCost += missing;
       outOrders.push({
         id: o.id, name: o.name, createdAt: o.createdAt, financial: o.financial, fulfillment: o.fulfillment,
         total: o.total, shipping: o.shipping, revenueExVat: r2(revenueExVat),
-        purchase: r2(purchase), fee: r2(fee), freight, profit: profit != null ? r2(profit) : null,
+        purchase: r2(purchase), fee: r2(fee), freight, txFees: r2(txFees), paymentRate: o.paymentRate, profit: profit != null ? r2(profit) : null,
         margin: profit != null && revenueExVat > 0 ? r2(profit / revenueExVat) : null,
         missingCostUnits: missing, lines,
       });

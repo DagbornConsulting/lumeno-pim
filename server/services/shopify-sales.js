@@ -90,6 +90,7 @@ export async function getOrders(store, { days = 30, force = false } = {}) {
         currentSubtotalPriceSet { shopMoney { amount } }
         currentTotalPriceSet { shopMoney { amount } }
         totalShippingPriceSet { shopMoney { amount } }
+        transactions(first: 10) { kind status fees { amount { amount } rateName } }
         lineItems(first: 100) { nodes { sku title quantity discountedTotalSet { shopMoney { amount } } discountAllocations { allocatedAmountSet { shopMoney { amount } } } product { id } } }
       }
     }
@@ -107,6 +108,11 @@ export async function getOrders(store, { days = 30, force = false } = {}) {
         subtotal: Number(o.currentSubtotalPriceSet?.shopMoney?.amount || 0),
         total: Number(o.currentTotalPriceSet?.shopMoney?.amount || 0),
         shipping: Number(o.totalShippingPriceSet?.shopMoney?.amount || 0),
+        // Actual payment fees from Shopify Payments (e.g. klarna_base 2.99 % + 4 kr).
+        txFees: Math.round((o.transactions || [])
+          .filter(t => t.status === 'SUCCESS' && (t.kind === 'SALE' || t.kind === 'CAPTURE'))
+          .reduce((a, t) => a + (t.fees || []).reduce((x, f) => x + Number(f.amount?.amount || 0), 0), 0) * 100) / 100,
+        paymentRate: (o.transactions || []).flatMap(t => t.fees || []).map(f => f.rateName).find(Boolean) || null,
         lines: o.lineItems.nodes.map(li => {
           // discountedTotalSet only reflects LINE-level discounts; order-level
           // discount codes (e.g. VALKOMMEN10) sit in discountAllocations.
