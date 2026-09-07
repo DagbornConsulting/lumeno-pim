@@ -191,6 +191,23 @@ function SupplierCard({ onOpenProduct }) {
   const [msg, setMsg] = useState(null);
   const fileRef = useRef(null);
   const [tab, setTab] = useState('priceChanged');
+  const [rowConfirm, setRowConfirm] = useState(null);
+  const [rowBusy, setRowBusy] = useState(null);
+
+  const applyRow = async (r) => {
+    setRowBusy(r.sku); setMsg(null);
+    try {
+      const resp = await fetch(`${API_URL}/supplier/apply-row`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sku: r.sku, price: r.suggestedPrice, costUnit: r.newCost, pack: r.pack }),
+      });
+      const d = await resp.json();
+      if (!resp.ok) throw new Error(d.error || 'Uppdatering misslyckades');
+      setMsg(`${r.sku}: pris ${d.from.price} → ${d.to.price} kr och inköp ${d.from.cost ?? '–'} → ${d.to.cost} kr uppdaterat i Shopify.`);
+      await reload(true);
+    } catch (e) { setMsg(`Fel: ${e.message}`); }
+    finally { setRowBusy(null); setRowConfirm(null); }
+  };
 
   const upload = async (file) => {
     if (!file) return;
@@ -241,7 +258,21 @@ function SupplierCard({ onOpenProduct }) {
                 <li key={r.sku} className={r.productId ? 'clickable' : ''} onClick={() => r.productId && onOpenProduct?.(r.productId)}>
                   <span className="grow"><span className="title">{r.title}</span><span className="sub">{r.sku}{r.pack > 1 ? ` · ${r.pack}-pack` : ''}{r.deliveryWeek ? ` · lev. v${r.deliveryWeek}` : ''}</span></span>
                   {tab === 'priceChanged' && (
-                    <span className="num">{kr(r.oldCost)} → <b style={{ color: r.change > 0 ? '#b83a3a' : '#2f8f55' }}>{kr(r.newCost)}</b><br /><span className="sub">pris {kr(r.currentPrice)} → bör {kr(r.suggestedPrice)}</span></span>
+                    <>
+                      <span className="num">{kr(r.oldCost)} → <b style={{ color: r.change > 0 ? '#b83a3a' : '#2f8f55' }}>{kr(r.newCost)}</b><br /><span className="sub">pris {kr(r.currentPrice)} → bör {kr(r.suggestedPrice)}</span></span>
+                      <span onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                        {rowConfirm === r.sku ? (
+                          <>
+                            <button className="btn btn-primary btn-sm" disabled={rowBusy === r.sku} onClick={() => applyRow(r)}>
+                              {rowBusy === r.sku ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />} Sätt {kr(r.suggestedPrice)}
+                            </button>{' '}
+                            <button className="btn btn-secondary btn-sm" disabled={rowBusy === r.sku} onClick={() => setRowConfirm(null)}>Avbryt</button>
+                          </>
+                        ) : (
+                          <button className="btn btn-secondary btn-sm" title={`Sätter pris ${r.suggestedPrice} kr och inköp ${r.newCost} kr i Shopify + PIM`} onClick={() => setRowConfirm(r.sku)}>Uppdatera i Shopify</button>
+                        )}
+                      </span>
+                    </>
                   )}
                   {tab === 'outOfStock' && <span className="num" style={{ color: '#b83a3a' }}>lager {r.stock ?? 0}</span>}
                 </li>

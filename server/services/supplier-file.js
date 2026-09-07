@@ -13,6 +13,8 @@ import { supabase } from '../db.js';
 import { importPackQty } from './price-watch.js';
 
 const num = v => { const n = Number(String(v ?? '').replace(/\s/g, '').replace(',', '.')); return Number.isFinite(n) ? n : null; };
+// House rule: sale prices always end in 9 — round UP to the nearest ...9.
+export const roundUp9 = v => { const n = Math.ceil(Number(v) || 0); return n + ((9 - (n % 10) + 10) % 10); };
 const yes = v => /^(ja|yes|true|1)$/i.test(String(v ?? '').trim());
 const find = (headers, re) => headers.find(h => re.test(String(h).trim()));
 
@@ -130,7 +132,7 @@ export async function supplierReport(storeId, cap = 15) {
         ...base, oldCost: Number(l.cost), newCost: Number(s.supplier_price),
         change: Number(s.supplier_price) - Number(l.cost),
         currentPrice: l.product.default_price,
-        suggestedPrice: Math.round(Number(s.supplier_price) * l.pack * 2.5),
+        suggestedPrice: roundUp9(Number(s.supplier_price) * l.pack * 2.5),
       });
     }
   }

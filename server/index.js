@@ -2456,7 +2456,7 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
         costDiff.push({
           sku, productTitle: v.productTitle || '', inventoryItemId: v.inventoryItemId,
           supplierUnitCost: unit, pack, expectedCost: expected, shopifyCost: current, kind,
-          price: v.price, suggestedPrice: Math.round(expected * multiplier),
+          price: v.price, suggestedPrice: supplierFile.roundUp9(expected * multiplier),
         });
       }
       const sev = { missing: 0, 'unit-on-pack': 1, mismatch: 2, 'supplier-change': 3 };
@@ -3199,6 +3199,58 @@ const cronAuthorized = (req) => {
     && crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(secret));
 };
 
+// Nightly reconciliation Shopify → PIM (pull-only, never writes to Shopify):
+// - sale prices are mirrored into PIM (Shopify is ground truth for price), so
+//   manual price changes show up in PIM by the next morning;
+// - purchase costs are healed when Shopify's "cost per item" already agrees
+//   with the supplier file (i.e. someone fixed it manually in Shopify) but PIM
+//   still holds the old value — this is what empties the dashboard's
+//   "Inköpspris ändrat" list after manual fixes.
+async function reconcilePricesFromShopify(store) {
+  const { map } = await shopifySync.fetchInventoryMapFromShopify(store);
+  const all = async (t, sel, f) => { const out = []; for (let i = 0; ; i += 1000) { let q = supabase.from(t).select(sel).range(i, i + 999); if (f) q = f(q); const { data, error } = await q; if (error) throw new Error(`${t}: ${error.message}`); out.push(...(data || [])); if (!data || data.length < 1000) break; } return out; };
+  const products = await all('products', 'id, sku, default_price, default_cost, pack_qty', q => q.eq('store_id', store.id));
+  const productBySku = new Map(products.filter(p => p.sku).map(p => [String(p.sku).trim(), p]));
+  const productIds = new Set(products.map(p => p.id));
+  const variants = (await all('variants', 'id, product_id, sku, price, cost, pack_qty')).filter(v => productIds.has(v.product_id));
+  const variantBySku = new Map(variants.filter(v => v.sku).map(v => [String(v.sku).trim(), v]));
+  let stockBySku = new Map();
+  try { stockBySku = new Map((await all('supplier_stock', 'sku, supplier_price', q => q.eq('store_id', store.id))).map(s => [s.sku, s.supplier_price != null ? Number(s.supplier_price) : null])); } catch (_) {}
+
+  let priceUpdates = 0, costUpdates = 0;
+  for (const [sku, list] of map) {
+    if (list.length !== 1) continue; // duplicate SKUs are resolved manually
+    const s = list[0];
+    const pv = variantBySku.get(sku);
+    const pp = productBySku.get(sku);
+    if (s.price != null) {
+      if (pv && Math.abs(Number(pv.price ?? -1) - s.price) > 0.001) { await supabase.from('variants').update({ price: s.price }).eq('id', pv.id); priceUpdates++; }
+      if (pp && Math.abs(Number(pp.default_price ?? -1) - s.price) > 0.001) { await supabase.from('products').update({ default_price: s.price }).eq('id', pp.id); priceUpdates++; }
+    }
+    const sup = stockBySku.get(sku);
+    if (sup != null && s.unitCost != null) {
+      const pack = Math.max(1, Number(pv?.pack_qty ?? pp?.pack_qty) || 1);
+      if (Math.abs(s.unitCost - sup * pack) <= 0.5) { // Shopify already matches the supplier file
+        if (pv && Math.abs(Number(pv.cost ?? -1) - sup) > 0.5) { await supabase.from('variants').update({ cost: sup }).eq('id', pv.id); costUpdates++; }
+        if (pp && Math.abs(Number(pp.default_cost ?? -1) - sup) > 0.5) { await supabase.from('products').update({ default_cost: sup }).eq('id', pp.id); costUpdates++; }
+      }
+    }
+  }
+  if (priceUpdates || costUpdates) {
+    try { await db.logActivity('shopify_reconcile', 'store', store.id, `Nattlig avstämning: ${priceUpdates} priser och ${costUpdates} inköpspriser speglade från Shopify till PIM`, { priceUpdates, costUpdates }, store.id); } catch (_) {}
+  }
+  return { priceUpdates, costUpdates };
+}
+
+// Run the reconciliation on demand.
+app.post('/api/shopify/stores/:storeId/reconcile-prices', async (req, res) => {
+  try {
+    const store = await db.getStoreById(req.params.storeId);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken har ingen access token' });
+    res.json(await reconcilePricesFromShopify(store));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Daily Shopify → PIM pull for serverless hosts (the SHOPIFY_PULL_MINUTES
 // poll never fires on Vercel). Imports new Shopify products into staging,
 // pulls content changes and collections. Pull-only: never writes to Shopify.
@@ -3216,6 +3268,9 @@ app.get('/api/cron/shopify-pull', async (req, res) => {
     if (!store.access_token) continue;
     const r = { store: store.name };
     try { r.newProducts = await importNewProductsFromShopify(store, { deadlineMs }); } catch (e) { r.newProductsError = e.message; }
+    if (Date.now() < deadlineMs) {
+      try { r.reconcile = await reconcilePricesFromShopify(store); } catch (e) { r.reconcileError = e.message; }
+    } else r.reconcileSkipped = 'tidsbudget slut';
     if (Date.now() < deadlineMs) {
       try { r.pull = await pullAllFromShopify(store); } catch (e) { r.pullError = e.message; }
     } else r.pullSkipped = 'tidsbudget slut';
@@ -3639,6 +3694,78 @@ app.get('/api/dashboard/supplier', async (req, res) => {
     const store = await priceWatchStore(req);
     res.json(await supplierFile.supplierReport(store.id, 100));
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// One-click from the supplier card's "Inköpspris ändrat" row: set the new sale
+// price and the new cost for one SKU in Shopify, mirror to PIM and the price-
+// watch rows. Explicit per-row user action — nothing runs automatically.
+app.post('/api/supplier/apply-row', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const sku = String(req.body?.sku || '').trim();
+    if (!sku) return res.status(400).json({ error: 'sku saknas' });
+    const price = req.body?.price != null ? Math.round(Number(req.body.price)) : null;
+    const costUnit = req.body?.costUnit != null ? Number(req.body.costUnit) : null;
+    const pack = Math.max(1, Math.round(Number(req.body?.pack)) || 1);
+    if (price == null && costUnit == null) return res.status(400).json({ error: 'Ange pris och/eller kostnad' });
+    if (price != null && (!Number.isFinite(price) || price <= 0)) return res.status(400).json({ error: 'Ogiltigt pris' });
+    if (costUnit != null && (!Number.isFinite(costUnit) || costUnit <= 0)) return res.status(400).json({ error: 'Ogiltig kostnad' });
+
+    const client = shopifySync.getClient(store);
+    const d = await client.graphql(`query($q: String!) { productVariants(first: 5, query: $q) {
+      nodes { id sku price product { id title } inventoryItem { id unitCost { amount } } } } }`, { q: `sku:${sku}` });
+    const matches = (d.productVariants?.nodes || []).filter(x => String(x.sku || '').trim() === sku);
+    if (!matches.length) return res.status(404).json({ error: `Hittar ingen variant med SKU ${sku} i Shopify` });
+    if (matches.length > 1) return res.status(400).json({ error: `SKU ${sku} finns på flera varianter i Shopify — rätta manuellt` });
+    const v = matches[0];
+    const from = { price: Number(v.price), cost: v.inventoryItem.unitCost ? Number(v.inventoryItem.unitCost.amount) : null };
+    const shopifyCost = costUnit != null ? Math.round(costUnit * pack * 100) / 100 : null;
+
+    if (price != null) {
+      const m = await client.graphql(`mutation($pid: ID!, $v: [ProductVariantsBulkInput!]!) {
+        productVariantsBulkUpdate(productId: $pid, variants: $v) { userErrors { field message } } }`,
+        { pid: v.product.id, v: [{ id: v.id, price: price.toFixed(2) }] });
+      const errs = m.productVariantsBulkUpdate?.userErrors || [];
+      if (errs.length) return res.status(400).json({ error: `Shopify (pris): ${errs.map(e => e.message).join('; ')}` });
+    }
+    if (shopifyCost != null) {
+      const m = await client.graphql(`mutation($id: ID!, $input: InventoryItemInput!) {
+        inventoryItemUpdate(id: $id, input: $input) { userErrors { field message } } }`,
+        { id: v.inventoryItem.id, input: { cost: shopifyCost.toFixed(2) } });
+      const errs = m.inventoryItemUpdate?.userErrors || [];
+      if (errs.length) return res.status(400).json({ error: `Shopify (kostnad): ${errs.map(e => e.message).join('; ')}` });
+    }
+
+    // Mirror to PIM (cost is stored per unit in PIM, per sold article in Shopify).
+    const vPatch = { ...(price != null ? { price } : {}), ...(costUnit != null ? { cost: costUnit } : {}) };
+    await supabase.from('variants').update(vPatch).eq('sku', sku);
+    const pPatch = { ...(price != null ? { default_price: price } : {}), ...(costUnit != null ? { default_cost: costUnit } : {}) };
+    await supabase.from('products').update(pPatch).eq('store_id', store.id).eq('sku', sku);
+
+    // Refresh price-watch rows: new price/status and (with new cost) new floor.
+    try {
+      const rows = await priceWatch.productRows({ storeId: store.id, productId: null, skus: [sku] });
+      const settings = priceWatch.getSettings(store);
+      for (const r of rows) {
+        if (costUnit != null) {
+          const cp = Math.round(costUnit * (r.pack_qty || 1) * 100) / 100;
+          await supabase.from('price_benchmarks').update({ cost_price: cp, floor_price: priceWatch.computeFloor(cp, settings) }).eq('id', r.id);
+        }
+      }
+      if (price != null && rows.length) await priceWatch.applyPriceChange({ storeId: store.id, rowIds: rows.map(r => r.id), price, settings });
+    } catch (e) { console.warn('apply-row: price-watch refresh failed:', e.message); }
+
+    try {
+      await db.logActivity('supplier_apply_row', 'store', store.id,
+        `${v.product.title} (${sku}): ${price != null ? `pris ${from.price} → ${price} kr` : ''}${price != null && costUnit != null ? ', ' : ''}${costUnit != null ? `inköp ${from.cost ?? '–'} → ${shopifyCost} kr` : ''}`,
+        { sku, from, to: { price, cost: shopifyCost }, by: currentUserLabel(req) }, store.id);
+    } catch (_) {}
+
+    res.json({ ok: true, sku, from, to: { price, cost: shopifyCost } });
+  } catch (e) {
+    console.error('supplier apply-row error:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Upload Affari's Dropship.csv (stock/price) or ExcelExportGeneral (pack_qty).

@@ -15,8 +15,8 @@ const kr = v => (v == null ? '–' : `${Number(v).toLocaleString('sv-SE', { maxi
 const kr2 = v => (v == null ? '–' : `${Number(v).toLocaleString('sv-SE', { maximumFractionDigits: 2 })} kr`);
 const dt = v => (v ? new Date(v).toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' }) : '–');
 const pct = v => (v == null ? '–' : `${Math.round(Number(v) * 100)} %`);
-// Retail rounding: whole kronor ending in 9 when above 100, else whole kronor.
-const nice = v => { const n = Math.round(Number(v)); return n >= 100 ? Math.floor(n / 10) * 10 + 9 : n; };
+// House rule: prices always end in 9 — round UP to the nearest ...9.
+const nice = v => { const n = Math.ceil(Number(v) || 0); return n + ((9 - (n % 10) + 10) % 10); };
 
 function Row({ row, productId, settings, onReload, onPriceChanged }) {
   const [price, setPrice] = useState(String(Math.round(row.our_price || 0)));
