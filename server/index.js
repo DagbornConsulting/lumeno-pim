@@ -3637,7 +3637,7 @@ app.get('/api/dashboard/google', async (req, res) => {
 app.get('/api/dashboard/supplier', async (req, res) => {
   try {
     const store = await priceWatchStore(req);
-    res.json(await supplierFile.supplierReport(store.id));
+    res.json(await supplierFile.supplierReport(store.id, 100));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

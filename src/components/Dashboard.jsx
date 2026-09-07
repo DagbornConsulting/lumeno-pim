@@ -236,8 +236,8 @@ function SupplierCard({ onOpenProduct }) {
             <span className="sub">· fil {ago(data.lastImport)}</span>
           </div>
           {list.length ? (
-            <ul className="dash-list">
-              {list.slice(0, 6).map(r => (
+            <ul className="dash-list" style={{ maxHeight: 340, overflowY: 'auto' }}>
+              {list.map(r => (
                 <li key={r.sku} className={r.productId ? 'clickable' : ''} onClick={() => r.productId && onOpenProduct?.(r.productId)}>
                   <span className="grow"><span className="title">{r.title}</span><span className="sub">{r.sku}{r.pack > 1 ? ` · ${r.pack}-pack` : ''}{r.deliveryWeek ? ` · lev. v${r.deliveryWeek}` : ''}</span></span>
                   {tab === 'priceChanged' && (
