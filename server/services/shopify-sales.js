@@ -91,7 +91,7 @@ export async function getOrders(store, { days = 30, force = false } = {}) {
         currentTotalPriceSet { shopMoney { amount } }
         totalShippingPriceSet { shopMoney { amount } }
         transactions(first: 10) { kind status fees { amount { amount } rateName } }
-        lineItems(first: 100) { nodes { sku title quantity discountedTotalSet { shopMoney { amount } } discountAllocations { allocatedAmountSet { shopMoney { amount } } } product { id } } }
+        lineItems(first: 100) { nodes { sku title quantity originalTotalSet { shopMoney { amount } } discountedTotalSet { shopMoney { amount } } discountAllocations { allocatedAmountSet { shopMoney { amount } } } variant { compareAtPrice } product { id } } }
       }
     }
   }`;
@@ -117,12 +117,21 @@ export async function getOrders(store, { days = 30, force = false } = {}) {
           // discountedTotalSet only reflects LINE-level discounts; order-level
           // discount codes (e.g. VALKOMMEN10) sit in discountAllocations.
           // Subtract them so line revenue matches what the customer paid.
+          const qty = Number(li.quantity || 0);
+          const original = Number(li.originalTotalSet?.shopMoney?.amount || 0);
           const gross = Number(li.discountedTotalSet?.shopMoney?.amount || 0);
           const allocated = (li.discountAllocations || []).reduce((a, x) => a + Number(x.allocatedAmountSet?.shopMoney?.amount || 0), 0);
+          // Rea (compare-at reduction) is baked into the sale price and never
+          // appears as a discount on the order — derive it from the variant's
+          // current compare-at price (approximation if it changed since).
+          const compareAt = li.variant?.compareAtPrice != null ? Number(li.variant.compareAtPrice) : null;
+          const unitOriginal = qty ? original / qty : 0;
+          const saleDiscount = compareAt && compareAt > unitOriginal ? Math.round((compareAt - unitOriginal) * qty * 100) / 100 : 0;
           return {
-            sku: String(li.sku || '').trim(), title: li.title, qty: Number(li.quantity || 0),
+            sku: String(li.sku || '').trim(), title: li.title, qty,
             lineTotal: Math.round((gross - allocated) * 100) / 100,
-            discount: Math.round(allocated * 100) / 100,
+            discount: Math.round((allocated + (original - gross)) * 100) / 100, // kod + radrabatt
+            saleDiscount, // rea mot jämförpris
             shopifyProductId: li.product?.id ? li.product.id.split('/').pop() : null,
           };
         }),

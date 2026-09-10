@@ -3677,21 +3677,28 @@ app.get('/api/sales/report', async (req, res) => {
     for (const o of orders) {
       if (o.cancelled) continue;
       let purchase = 0, missing = 0;
+      // Allocate the order's actual payment fee onto lines by revenue share
+      // (the shipping part of the fee stays on order level).
+      const txFactor = (o.txFees || 0) / ((o.subtotal + o.shipping) || 1);
       const lines = o.lines.map(li => {
         const costArt = costBySku.get(li.sku);
         const lineCost = costArt != null ? costArt * li.qty : null;
         if (lineCost != null) purchase += lineCost; else missing += li.qty;
         const lineExVat = li.lineTotal / vatMul;
         const fee = lineCost != null ? lineCost * s.handling_fee : null;
-        const profit = lineCost != null ? lineExVat - lineCost - fee : null;
+        const txFeeShare = li.lineTotal * txFactor;
+        const profit = lineCost != null ? lineExVat - lineCost - fee - txFeeShare : null;
         // per-product aggregation (freight excluded — it is per order)
         const key = li.sku || `(utan sku) ${li.title}`;
-        const agg = perProduct.get(key) || { sku: li.sku, title: li.title, productId: pimProductBySku.get(li.sku) || null, units: 0, revenue: 0, revenueExVat: 0, purchase: 0, fee: 0, profit: 0, missingCost: costArt == null };
+        const agg = perProduct.get(key) || { sku: li.sku, title: li.title, productId: pimProductBySku.get(li.sku) || null, units: 0, revenue: 0, revenueExVat: 0, purchase: 0, fee: 0, txFees: 0, discount: 0, saleDiscount: 0, profit: 0, missingCost: costArt == null };
         agg.units += li.qty; agg.revenue += li.lineTotal; agg.revenueExVat += lineExVat;
+        agg.txFees += txFeeShare; agg.discount += li.discount || 0; agg.saleDiscount += li.saleDiscount || 0;
         if (lineCost != null) { agg.purchase += lineCost; agg.fee += fee; agg.profit += profit; } else agg.missingCost = true;
         perProduct.set(key, agg);
-        return { ...li, costPerArticle: costArt ?? null, lineCost: lineCost != null ? r2(lineCost) : null, lineExVat: r2(lineExVat), fee: fee != null ? r2(fee) : null, profit: profit != null ? r2(profit) : null };
+        return { ...li, costPerArticle: costArt ?? null, lineCost: lineCost != null ? r2(lineCost) : null, lineExVat: r2(lineExVat), fee: fee != null ? r2(fee) : null, txFeeShare: r2(txFeeShare), profit: profit != null ? r2(profit) : null };
       });
+      const orderDiscount = r2(o.lines.reduce((a, l) => a + (l.discount || 0), 0));
+      const orderSaleDiscount = r2(o.lines.reduce((a, l) => a + (l.saleDiscount || 0), 0));
       const revenue = o.subtotal + o.shipping; // incl. VAT, customer side
       const revenueExVat = revenue / vatMul;
       const fee = purchase * s.handling_fee;
@@ -3700,18 +3707,21 @@ app.get('/api/sales/report', async (req, res) => {
       const profit = missing ? null : revenueExVat - purchase - fee - freight - txFees;
       totals.orders++; totals.revenue += revenue; totals.revenueExVat += revenueExVat;
       totals.purchase += purchase; totals.fee += fee; totals.freight += freight; totals.txFees = (totals.txFees || 0) + txFees;
+      totals.discount = (totals.discount || 0) + orderDiscount; totals.saleDiscount = (totals.saleDiscount || 0) + orderSaleDiscount;
       if (profit != null) totals.profit += profit;
       totals.unitsMissingCost += missing;
       outOrders.push({
         id: o.id, name: o.name, createdAt: o.createdAt, financial: o.financial, fulfillment: o.fulfillment,
         total: o.total, shipping: o.shipping, revenueExVat: r2(revenueExVat),
-        purchase: r2(purchase), fee: r2(fee), freight, txFees: r2(txFees), paymentRate: o.paymentRate, profit: profit != null ? r2(profit) : null,
+        purchase: r2(purchase), fee: r2(fee), freight, txFees: r2(txFees), paymentRate: o.paymentRate,
+        discount: orderDiscount, saleDiscount: orderSaleDiscount, profit: profit != null ? r2(profit) : null,
         margin: profit != null && revenueExVat > 0 ? r2(profit / revenueExVat) : null,
         missingCostUnits: missing, lines,
       });
     }
     const products = [...perProduct.values()].map(a => ({
       ...a, revenue: r2(a.revenue), revenueExVat: r2(a.revenueExVat), purchase: r2(a.purchase), fee: r2(a.fee),
+      txFees: r2(a.txFees), discount: r2(a.discount), saleDiscount: r2(a.saleDiscount),
       profit: a.missingCost ? null : r2(a.profit), margin: !a.missingCost && a.revenueExVat > 0 ? r2(a.profit / a.revenueExVat) : null,
     })).sort((a, b) => (b.profit ?? -1e9) - (a.profit ?? -1e9));
 
