@@ -2425,12 +2425,12 @@ app.post('/api/inventory/preview', upload.single('file'), async (req, res) => {
       const packBySku = new Map(), pimCostBySku = new Map();
       try {
         for (let from = 0; ; from += 1000) {
-          const { data } = await supabase.from('products').select('sku, pack_qty, default_cost').eq('store_id', storeId).range(from, from + 999);
+          const { data } = await supabase.from('products').select('sku, pack_qty, default_cost').eq('store_id', storeId).order('id', { ascending: true }).range(from, from + 999);
           for (const p of data || []) if (p.sku) { packBySku.set(String(p.sku).trim(), p.pack_qty || 1); if (p.default_cost != null) pimCostBySku.set(String(p.sku).trim(), Number(p.default_cost)); }
           if (!data || data.length < 1000) break;
         }
         for (let from = 0; ; from += 1000) {
-          const { data } = await supabase.from('variants').select('sku, pack_qty, cost').range(from, from + 999);
+          const { data } = await supabase.from('variants').select('sku, pack_qty, cost').order('id', { ascending: true }).range(from, from + 999);
           for (const v of data || []) if (v.sku) { if (v.pack_qty) packBySku.set(String(v.sku).trim(), v.pack_qty); if (v.cost != null && !pimCostBySku.has(String(v.sku).trim())) pimCostBySku.set(String(v.sku).trim(), Number(v.cost)); }
           if (!data || data.length < 1000) break;
         }
@@ -5696,7 +5696,7 @@ app.post('/api/db/stores/:id/sync', async (req, res) => {
         .from('store_products')
         .select('id, product_id, shopify_product_id, shopify_baseline')
         .eq('store_id', storeId).eq('sync_status', 'pending')
-        .range(from, from + 999);
+        .order('id', { ascending: true }).range(from, from + 999);
       pending.push(...(data || []));
       if (!data || data.length < 1000) break;
     }
@@ -5976,7 +5976,7 @@ async function importNewProductsFromShopify(store, { deadlineMs = null } = {}) {
   // PIM SKU set + already-linked Shopify ids.
   const pimVariants = [];
   for (let from = 0; ; from += 1000) {
-    const { data } = await supabase.from('products').select('variants(sku)').eq('store_id', store.id).range(from, from + 999);
+    const { data } = await supabase.from('products').select('variants(sku)').eq('store_id', store.id).order('id', { ascending: true }).range(from, from + 999);
     pimVariants.push(...(data || []));
     if (!data || data.length < 1000) break;
   }
@@ -6256,7 +6256,7 @@ async function pullAllFromShopify(store) {
     const { data } = await supabase
       .from('products')
       .select('id, title, description, product_type, tags, metafields')
-      .eq('store_id', store.id).range(from, from + 999);
+      .eq('store_id', store.id).order('id', { ascending: true }).range(from, from + 999);
     products.push(...(data || []));
     if (!data || data.length < 1000) break;
   }
@@ -6268,7 +6268,7 @@ async function pullAllFromShopify(store) {
       .from('store_products')
       .select('id, product_id, shopify_product_id, shopify_baseline')
       .eq('store_id', store.id).not('shopify_product_id', 'is', null)
-      .range(from, from + 999);
+      .order('id', { ascending: true }).range(from, from + 999);
     links.push(...(data || []));
     if (!data || data.length < 1000) break;
   }
@@ -6348,7 +6348,7 @@ async function pullCollectionsFromShopify(store) {
 
   const existing = [];
   for (let from = 0; ; from += 1000) {
-    const { data } = await supabase.from('collections').select('handle').eq('store_id', store.id).range(from, from + 999);
+    const { data } = await supabase.from('collections').select('handle').eq('store_id', store.id).order('id', { ascending: true }).range(from, from + 999);
     existing.push(...(data || []));
     if (!data || data.length < 1000) break;
   }
@@ -6643,7 +6643,7 @@ app.post('/api/shopify/stores/:storeId/relink-by-sku', async (req, res) => {
         .from('products')
         .select('id, sku, variants(sku)')
         .eq('store_id', storeId)
-        .range(from, from + 999);
+        .order('id', { ascending: true }).range(from, from + 999);
       if (error) throw error;
       products.push(...(data || []));
       if (!data || data.length < 1000) break;
@@ -6655,7 +6655,7 @@ app.post('/api/shopify/stores/:storeId/relink-by-sku', async (req, res) => {
         .from('store_products')
         .select('product_id, shopify_product_id')
         .eq('store_id', storeId)
-        .range(from, from + 999);
+        .order('id', { ascending: true }).range(from, from + 999);
       existingLinks.push(...(data || []));
       if (!data || data.length < 1000) break;
     }
@@ -6719,7 +6719,7 @@ app.post('/api/shopify/stores/:storeId/capture-baseline', async (req, res) => {
         .select('id, product_id, shopify_product_id, products!inner(id, metafields)')
         .eq('store_id', storeId)
         .not('shopify_product_id', 'is', null)
-        .range(from, from + 999);
+        .order('id', { ascending: true }).range(from, from + 999);
       if (Array.isArray(productIds) && productIds.length) q = q.in('product_id', productIds);
       const { data, error } = await q;
       if (error) throw error;

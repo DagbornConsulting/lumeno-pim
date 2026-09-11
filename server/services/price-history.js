@@ -21,7 +21,7 @@ const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 async function fetchAll(table, select, applyFilter) {
   const out = [];
   for (let from = 0; ; from += 1000) {
-    let q = supabase.from(table).select(select).range(from, from + 999);
+    let q = supabase.from(table).select(select).order('id', { ascending: true }).range(from, from + 999);
     if (applyFilter) q = applyFilter(q);
     const { data, error } = await q;
     if (error) throw new Error(`${table}: ${error.message}`);

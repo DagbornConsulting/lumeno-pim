@@ -108,7 +108,7 @@ async function fetchAll(table, select, applyFilter) {
   const out = [];
   const PAGE = 1000;
   for (let from = 0; ; from += PAGE) {
-    let q = supabase.from(table).select(select).range(from, from + PAGE - 1);
+    let q = supabase.from(table).select(select).order('id', { ascending: true }).range(from, from + PAGE - 1);
     if (applyFilter) q = applyFilter(q);
     const { data, error } = await q;
     if (error) throw new Error(`${table}: ${error.message}`);
