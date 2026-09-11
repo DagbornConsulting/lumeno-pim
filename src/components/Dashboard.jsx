@@ -156,6 +156,51 @@ function MerchantCard({ onNavigate }) {
 }
 
 // --- Google (Search Console + GA4) ---------------------------------------
+// Compact 28-day daily sparkline. Single series per chart (a titled small
+// multiple), so identity comes from the header — no legend needed. Per-day
+// value via native tooltip on invisible hit columns.
+const svDate = d => new Date(d).toLocaleDateString('sv-SE', { day: 'numeric', month: 'short' });
+function Spark({ series, valueKey, label }) {
+  if (!series?.length) return null;
+  const w = 280, h = 36, pad = 3;
+  const vals = series.map(s => Number(s[valueKey]) || 0);
+  const max = Math.max(...vals, 1);
+  const x = i => pad + i * ((w - 2 * pad) / Math.max(vals.length - 1, 1));
+  const y = v => h - pad - (v / max) * (h - 2 * pad);
+  const path = 'M' + vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' L');
+  const colW = (w - 2 * pad) / vals.length;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 36, display: 'block' }} role="img" aria-label={label}>
+      <line x1={pad} y1={h - pad} x2={w - pad} y2={h - pad} stroke="var(--border, #e3ded7)" strokeWidth="1" />
+      <path d={path} fill="none" stroke="var(--fg-soft, #3a3a3a)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={x(vals.length - 1)} cy={y(vals[vals.length - 1])} r="3" fill="var(--fg, #1a1a1a)" />
+      {vals.map((v, i) => (
+        <rect key={i} x={x(i) - colW / 2} y={0} width={colW} height={h} fill="transparent">
+          <title>{`${svDate(series[i].date)}: ${n(v)} ${label}`}</title>
+        </rect>
+      ))}
+    </svg>
+  );
+}
+// Weekly totals (4 × 7 days, oldest → newest) with change vs the week before.
+function WeekRow({ series, valueKey }) {
+  if (!series || series.length < 14) return null;
+  const weeks = [];
+  for (let i = series.length; i > 0 && weeks.length < 4; i -= 7) {
+    const chunk = series.slice(Math.max(0, i - 7), i);
+    weeks.unshift({ from: chunk[0].date, total: chunk.reduce((a, s) => a + (Number(s[valueKey]) || 0), 0) });
+  }
+  return (
+    <div className="dash-stats" style={{ gap: 10, marginBottom: 0, fontSize: 11 }}>
+      {weeks.map((wk, i) => (
+        <span key={wk.from} className="sub" title={`veckan från ${svDate(wk.from)}`}>
+          {svDate(wk.from)}: <b style={{ fontSize: 12 }}>{n(wk.total)}</b>{i > 0 && <> <Delta cur={wk.total} prev={weeks[i - 1].total} /></>}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function GoogleCard({ onNavigate }) {
   const [{ loading, data, error }, reload] = useLazy('/dashboard/google');
   return (
@@ -164,20 +209,28 @@ function GoogleCard({ onNavigate }) {
       {loading && !data ? <Spinner /> : error ? <Err text={error} /> : data?.notConfigured ? (
         <div className="dash-empty"><AlertTriangle size={14} color="#c98a16" /> {data.notConfigured === 'properties' ? 'Search Console och GA4 är inte kopplade – ange dem under SEO & Insikter.' : 'Google service-konto saknas på servern.'}</div>
       ) : data && (
-        <div className="dash-stats" style={{ flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {data.gsc ? data.gsc.error ? <Err text={`Search Console: ${data.gsc.error}`} /> : (
-            <>
-              <span><b>{n(data.gsc.clicks)}</b> klick från Google-sök <Delta cur={data.gsc.clicks} prev={data.gsc.prevClicks} /></span>
-              <span><b>{n(data.gsc.impressions)}</b> visningar <Delta cur={data.gsc.impressions} prev={data.gsc.prevImpressions} /></span>
-            </>
+            <div>
+              <div className="dash-stats" style={{ marginBottom: 4 }}>
+                <span><b>{n(data.gsc.clicks)}</b> klick från Google-sök <Delta cur={data.gsc.clicks} prev={data.gsc.prevClicks} /></span>
+                <span className="sub">{n(data.gsc.impressions)} visningar <Delta cur={data.gsc.impressions} prev={data.gsc.prevImpressions} /></span>
+              </div>
+              <Spark series={data.gsc.series} valueKey="clicks" label="klick" />
+              <WeekRow series={data.gsc.series} valueKey="clicks" />
+            </div>
           ) : <span className="sub">Search Console ej kopplad</span>}
           {data.ga4 ? data.ga4.error ? <Err text={`GA4: ${data.ga4.error}`} /> : (
-            <>
-              <span><b>{n(data.ga4.sessions)}</b> sessioner <Delta cur={data.ga4.sessions} prev={data.ga4.prevSessions} /></span>
-              <span><b>{n(data.ga4.purchases)}</b> köp · <b>{kr(data.ga4.revenue)}</b> <Delta cur={data.ga4.revenue} prev={data.ga4.prevRevenue} /></span>
-            </>
+            <div>
+              <div className="dash-stats" style={{ marginBottom: 4 }}>
+                <span><b>{n(data.ga4.sessions)}</b> sessioner <Delta cur={data.ga4.sessions} prev={data.ga4.prevSessions} /></span>
+                <span className="sub">{n(data.ga4.purchases)} köp · {kr(data.ga4.revenue)} <Delta cur={data.ga4.revenue} prev={data.ga4.prevRevenue} /></span>
+              </div>
+              <Spark series={data.ga4.series} valueKey="sessions" label="sessioner" />
+              <WeekRow series={data.ga4.series} valueKey="sessions" />
+            </div>
           ) : <span className="sub">GA4 ej kopplad</span>}
-          <span className="sub">jämfört med föregående 28 dagar</span>
+          <span className="sub" style={{ fontSize: 11 }}>Δ jämför med föregående 28 dagar; veckosiffrorna med veckan före. Håll muspekaren över kurvan för dagsvärden.</span>
         </div>
       )}
     </Card>

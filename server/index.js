@@ -3779,24 +3779,49 @@ app.get('/api/dashboard/google', async (req, res) => {
 
     const sum = (rows, k) => rows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
     const out = { fetchedAt: new Date().toISOString(), gsc: null, ga4: null };
+    // Fill calendar gaps so the daily series always covers the full window
+    // (GSC/GA4 omit zero days) — the sparkline needs an even time axis.
+    const fillDays = (rows, from, to, keys) => {
+      const byDate = new Map(rows.map(r => [r.date, r]));
+      const out2 = [];
+      for (let d = new Date(from); ymd(d) <= to; d.setUTCDate(d.getUTCDate() + 1)) {
+        const k = ymd(d);
+        const r = byDate.get(k) || {};
+        out2.push({ date: k, ...Object.fromEntries(keys.map(m => [m, Number(r[m]) || 0])) });
+      }
+      return out2;
+    };
+    const ymd = d => new Date(d).toISOString().slice(0, 10);
+
     if (siteUrl) {
       try {
         const [cur, prev] = await Promise.all([
           googleSeo.gscSearchAnalytics({ siteUrl, startDate: ymdDaysAgo(28), endDate: ymdDaysAgo(1), dimensions: ['date'], rowLimit: 100 }),
           googleSeo.gscSearchAnalytics({ siteUrl, startDate: ymdDaysAgo(56), endDate: ymdDaysAgo(29), dimensions: ['date'], rowLimit: 100 }),
         ]);
-        out.gsc = { clicks: sum(cur, 'clicks'), impressions: sum(cur, 'impressions'), prevClicks: sum(prev, 'clicks'), prevImpressions: sum(prev, 'impressions') };
+        out.gsc = {
+          clicks: sum(cur, 'clicks'), impressions: sum(cur, 'impressions'),
+          prevClicks: sum(prev, 'clicks'), prevImpressions: sum(prev, 'impressions'),
+          series: fillDays(cur, ymdDaysAgo(28), ymdDaysAgo(1), ['clicks', 'impressions']),
+        };
       } catch (e) { out.gsc = { error: e.message }; }
     }
     if (propertyId) {
       try {
         const metrics = ['sessions', 'ecommercePurchases', 'purchaseRevenue'];
-        const [cur, prev] = await Promise.all([
+        const [cur, prev, daily] = await Promise.all([
           googleSeo.ga4RunReport({ propertyId, startDate: '28daysAgo', endDate: 'yesterday', metrics }),
           googleSeo.ga4RunReport({ propertyId, startDate: '56daysAgo', endDate: '29daysAgo', metrics }),
+          googleSeo.ga4RunReport({ propertyId, startDate: '28daysAgo', endDate: 'yesterday', dimensions: ['date'], metrics: ['sessions'], limit: 40 }),
         ]);
         const c = cur.rows[0] || {}, p = prev.rows[0] || {};
-        out.ga4 = { sessions: c.sessions || 0, purchases: c.ecommercePurchases || 0, revenue: Math.round(c.purchaseRevenue || 0), prevSessions: p.sessions || 0, prevPurchases: p.ecommercePurchases || 0, prevRevenue: Math.round(p.purchaseRevenue || 0) };
+        // GA4 dates come as YYYYMMDD.
+        const dailyRows = (daily.rows || []).map(r => ({ date: `${String(r.date).slice(0, 4)}-${String(r.date).slice(4, 6)}-${String(r.date).slice(6, 8)}`, sessions: r.sessions || 0 }));
+        out.ga4 = {
+          sessions: c.sessions || 0, purchases: c.ecommercePurchases || 0, revenue: Math.round(c.purchaseRevenue || 0),
+          prevSessions: p.sessions || 0, prevPurchases: p.ecommercePurchases || 0, prevRevenue: Math.round(p.purchaseRevenue || 0),
+          series: fillDays(dailyRows, ymdDaysAgo(28), ymdDaysAgo(1), ['sessions']),
+        };
       } catch (e) { out.ga4 = { error: e.message }; }
     }
     _googleCache.set(key, { at: Date.now(), data: out });
