@@ -37,7 +37,7 @@ const ALERT_STATUSES = ['RÖD', 'BLÅ', 'GUL'];
 
 const round2 = n => (n == null || !Number.isFinite(n) ? null : Math.round(n * 100) / 100);
 const round3 = n => (n == null || !Number.isFinite(n) ? null : Math.round(n * 1000) / 1000);
-const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+const num = v => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; }; // NB: Number(null) === 0
 
 export function sanitizeSettings(raw = {}) {
   const out = {};

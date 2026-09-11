@@ -16,7 +16,7 @@ import shopifySync from '../shopify.js';
 
 const ymd = d => new Date(d).toISOString().slice(0, 10);
 const daysAgo = n => ymd(new Date(Date.now() - n * 864e5));
-const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+const num = v => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; }; // NB: Number(null) === 0
 
 async function fetchAll(table, select, applyFilter) {
   const out = [];
