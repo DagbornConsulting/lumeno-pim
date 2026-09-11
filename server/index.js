@@ -3210,8 +3210,9 @@ const cronAuthorized = (req) => {
 async function reconcilePricesFromShopify(store, prefetchedMap = null) {
   const map = prefetchedMap || (await shopifySync.fetchInventoryMapFromShopify(store)).map;
   const all = async (t, sel, f) => { const out = []; for (let i = 0; ; i += 1000) { let q = supabase.from(t).select(sel).range(i, i + 999); if (f) q = f(q); const { data, error } = await q; if (error) throw new Error(`${t}: ${error.message}`); out.push(...(data || [])); if (!data || data.length < 1000) break; } return out; };
-  const products = await all('products', 'id, sku, default_price, default_cost, pack_qty', q => q.eq('store_id', store.id));
+  const products = await all('products', 'id, sku, default_price, default_cost, pack_qty, product_category, seo_title, seo_description', q => q.eq('store_id', store.id));
   const productBySku = new Map(products.filter(p => p.sku).map(p => [String(p.sku).trim(), p]));
+  const productById = new Map(products.map(p => [p.id, p]));
   const productIds = new Set(products.map(p => p.id));
   const variants = (await all('variants', 'id, product_id, sku, price, cost, pack_qty')).filter(v => productIds.has(v.product_id));
   const variantBySku = new Map(variants.filter(v => v.sku).map(v => [String(v.sku).trim(), v]));
@@ -3237,10 +3238,32 @@ async function reconcilePricesFromShopify(store, prefetchedMap = null) {
       }
     }
   }
-  if (priceUpdates || costUpdates) {
-    try { await db.logActivity('shopify_reconcile', 'store', store.id, `Nattlig avstämning: ${priceUpdates} priser och ${costUpdates} inköpspriser speglade från Shopify till PIM`, { priceUpdates, costUpdates }, store.id); } catch (_) {}
+  // Category + SEO fields (Shopify → PIM). The Shopify taxonomy category is
+  // mirrored (Shopify is ground truth — it auto-categorises); SEO title/
+  // description only FILL empty PIM fields so PIM-authored texts that haven't
+  // been pushed yet are never overwritten.
+  let catUpdates = 0, seoUpdates = 0;
+  const doneProducts = new Set();
+  for (const [sku, list] of map) {
+    if (list.length !== 1) continue;
+    const s = list[0];
+    const pp = productBySku.get(sku) || productById.get(variantBySku.get(sku)?.product_id);
+    if (!pp || doneProducts.has(pp.id)) continue;
+    doneProducts.add(pp.id);
+    const patch = {};
+    if (s.categoryName && s.categoryName !== pp.product_category) patch.product_category = s.categoryName;
+    if (s.seoTitle && !pp.seo_title) patch.seo_title = String(s.seoTitle).slice(0, 255);
+    if (s.seoDescription && !pp.seo_description) patch.seo_description = s.seoDescription;
+    if (Object.keys(patch).length) {
+      await supabase.from('products').update(patch).eq('id', pp.id);
+      if (patch.product_category) catUpdates++;
+      if (patch.seo_title || patch.seo_description) seoUpdates++;
+    }
   }
-  return { priceUpdates, costUpdates };
+  if (priceUpdates || costUpdates || catUpdates || seoUpdates) {
+    try { await db.logActivity('shopify_reconcile', 'store', store.id, `Nattlig avstämning: ${priceUpdates} priser, ${costUpdates} inköpspriser, ${catUpdates} kategorier och ${seoUpdates} SEO-fält speglade från Shopify till PIM`, { priceUpdates, costUpdates, catUpdates, seoUpdates }, store.id); } catch (_) {}
+  }
+  return { priceUpdates, costUpdates, catUpdates, seoUpdates };
 }
 
 // Run the reconciliation on demand.

@@ -1379,6 +1379,8 @@ export const shopifySync = {
               products(first: 100, after: $c) {
                 nodes {
                   title status
+                  category { fullName }
+                  seo { title description }
                   variants(first: 100) {
                     nodes { id sku price compareAtPrice inventoryQuantity inventoryItem { id tracked unitCost { amount } } }
                   }
@@ -1414,6 +1416,9 @@ export const shopifySync = {
             price: v.price != null ? Number(v.price) : null,
             compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
             variantId: v.id, // GID
+            categoryName: p.category?.fullName || null,
+            seoTitle: p.seo?.title || null,
+            seoDescription: p.seo?.description || null,
           });
         }
       }
