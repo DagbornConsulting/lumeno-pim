@@ -102,23 +102,35 @@ export async function saleReport(storeId, { cap = 200 } = {}) {
     const price = num(latest.price), compareAt = num(latest.compare_at_price);
     if (!(compareAt != null && price != null && compareAt > price)) continue; // not on sale
 
-    // Sale streak: walk back over consecutive snapshot days that were on sale.
+    // Sale streak: walk back over consecutive days that were on sale. Rows
+    // backfilled from the benchmark history lack compare-at — treat a day at
+    // the same price as today's sale price as part of the sale (heuristic).
     let i = days.length - 1;
-    while (i > 0 && num(days[i - 1].compare_at_price) != null && num(days[i - 1].price) < num(days[i - 1].compare_at_price)) i--;
+    for (; i > 0; i--) {
+      const p = num(days[i - 1].price), cmp = num(days[i - 1].compare_at_price);
+      const onSaleThen = (cmp != null && p < cmp) || (cmp == null && p != null && Math.abs(p - price) < 0.01);
+      if (!onSaleThen) break;
+    }
     const saleStart = days[i].day;
     const saleDays = Math.round((new Date(today) - new Date(saleStart)) / 864e5) + 1;
 
     // Legal reference: lowest price during the 30 days BEFORE the reduction.
+    // While history is thinner than the window we take the lowest of every
+    // price we KNOW (incl. the sale itself) — a lower reference can only
+    // understate the discount, never overstate it. Ordinarie pris is the
+    // very last resort when there is no history at all.
     const windowFrom = ymd(new Date(new Date(saleStart) - 30 * 864e5));
     const pre30 = days.filter(d => d.day < saleStart && d.day >= windowFrom).map(d => num(d.price));
     const preAll = days.filter(d => d.day < saleStart).map(d => num(d.price));
     const lowestBeforeSale = pre30.length ? Math.min(...pre30) : (preAll.length ? Math.min(...preAll) : null);
-    const displayLowest = lowestBeforeSale ?? compareAt; // last resort: ordinarie pris
+    const last30 = days.filter(d => d.day >= daysAgo(30)).map(d => num(d.price));
+    const lowest30 = last30.length ? Math.min(...last30) : null;
+    const known = [lowestBeforeSale, lowest30].filter(v => v != null);
+    const displayLowest = pre30.length ? lowestBeforeSale : (known.length ? Math.min(...known) : compareAt);
     items.push({
       sku, price, compareAt, saleStart, saleDays,
       discountPct: Math.round((1 - price / compareAt) * 100),
-      lowestBeforeSale, displayLowest,
-      lowest30: Math.min(...days.filter(d => d.day >= daysAgo(30)).map(d => num(d.price))),
+      lowestBeforeSale, displayLowest, lowest30,
       approximate: !pre30.length, // history doesn't cover the full 30-day window
       dataFrom: days[0].day,
     });
