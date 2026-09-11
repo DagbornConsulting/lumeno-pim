@@ -20,6 +20,7 @@ import * as googleSeo from './services/google-seo.js';
 import * as priceWatch from './services/price-watch.js';
 import * as shopifySales from './services/shopify-sales.js';
 import * as supplierFile from './services/supplier-file.js';
+import * as priceHistory from './services/price-history.js';
 
 // Heavy modules — loaded in the background so they don't block cold-start parsing
 let anthropic = null;
@@ -3206,8 +3207,8 @@ const cronAuthorized = (req) => {
 //   with the supplier file (i.e. someone fixed it manually in Shopify) but PIM
 //   still holds the old value — this is what empties the dashboard's
 //   "Inköpspris ändrat" list after manual fixes.
-async function reconcilePricesFromShopify(store) {
-  const { map } = await shopifySync.fetchInventoryMapFromShopify(store);
+async function reconcilePricesFromShopify(store, prefetchedMap = null) {
+  const map = prefetchedMap || (await shopifySync.fetchInventoryMapFromShopify(store)).map;
   const all = async (t, sel, f) => { const out = []; for (let i = 0; ; i += 1000) { let q = supabase.from(t).select(sel).range(i, i + 999); if (f) q = f(q); const { data, error } = await q; if (error) throw new Error(`${t}: ${error.message}`); out.push(...(data || [])); if (!data || data.length < 1000) break; } return out; };
   const products = await all('products', 'id, sku, default_price, default_cost, pack_qty', q => q.eq('store_id', store.id));
   const productBySku = new Map(products.filter(p => p.sku).map(p => [String(p.sku).trim(), p]));
@@ -3268,9 +3269,21 @@ app.get('/api/cron/shopify-pull', async (req, res) => {
     if (!store.access_token) continue;
     const r = { store: store.name };
     try { r.newProducts = await importNewProductsFromShopify(store, { deadlineMs }); } catch (e) { r.newProductsError = e.message; }
+    // Fetch the live price/cost map once, share it between the steps.
+    let invMap = null;
     if (Date.now() < deadlineMs) {
-      try { r.reconcile = await reconcilePricesFromShopify(store); } catch (e) { r.reconcileError = e.message; }
-    } else r.reconcileSkipped = 'tidsbudget slut';
+      try { invMap = (await shopifySync.fetchInventoryMapFromShopify(store)).map; } catch (e) { r.invMapError = e.message; }
+    }
+    if (invMap && Date.now() < deadlineMs) {
+      try { r.reconcile = await reconcilePricesFromShopify(store, invMap); } catch (e) { r.reconcileError = e.message; }
+    } else if (!invMap) r.reconcileSkipped = 'tidsbudget slut';
+    // Daily price snapshot → "lägsta pris 30 dagar" (prisinformationslagen).
+    if (invMap) {
+      try { r.priceSnapshot = await priceHistory.snapshotPrices(store, invMap); } catch (e) { r.priceSnapshotError = e.message; }
+      if (Date.now() < deadlineMs + 10_000) {
+        try { r.lowestPriceMetafields = await priceHistory.syncLowestPriceMetafields(store, invMap); } catch (e) { r.lowestPriceMetafieldsError = e.message; }
+      }
+    }
     if (Date.now() < deadlineMs) {
       try { r.pull = await pullAllFromShopify(store); } catch (e) { r.pullError = e.message; }
     } else r.pullSkipped = 'tidsbudget slut';
@@ -3788,6 +3801,44 @@ app.get('/api/dashboard/google', async (req, res) => {
     }
     _googleCache.set(key, { at: Date.now(), data: out });
     res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============================================
+// PRISHISTORIK / "lägsta pris senaste 30 dagarna" (prisinformationslagen)
+// ============================================
+
+// REA card: everything on sale, sale length, legal reference price.
+app.get('/api/dashboard/rea', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json(await priceHistory.saleReport(store.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Snapshot today's prices now (the nightly cron also does this).
+app.post('/api/price-history/snapshot', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json(await priceHistory.snapshotPrices(store));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// One-time seed from the price-watch benchmark history.
+app.post('/api/price-history/backfill', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json(await priceHistory.backfillFromBenchmarks(store.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Write lumeno.lagsta_pris_30d on on-sale variants (theme reads it).
+app.post('/api/price-history/sync-metafields', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const result = await priceHistory.syncLowestPriceMetafields(store);
+    try { await db.logActivity('lowest_price_sync', 'store', store.id, `Lägsta pris 30 dgr synkat till Shopify-metafält för ${result.written} varianter på rea`, result, store.id); } catch (_) {}
+    res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

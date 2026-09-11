@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard, Scale, TrendingDown, AlertTriangle, CheckCircle2, RefreshCw,
   ArrowRight, Package, PackagePlus, Link2, Activity, Search, FolderInput, Zap,
-  ShoppingBag, Globe, Upload, Truck, Loader2,
+  ShoppingBag, Globe, Upload, Truck, Loader2, Percent,
 } from 'lucide-react';
 import './Dashboard.css';
 import './PriceWatch.css';
@@ -179,6 +179,67 @@ function GoogleCard({ onNavigate }) {
           ) : <span className="sub">GA4 ej kopplad</span>}
           <span className="sub">jämfört med föregående 28 dagar</span>
         </div>
+      )}
+    </Card>
+  );
+}
+
+// --- REA / lägsta pris 30 dagar (prisinformationslagen) -------------------
+function SaleCard({ onOpenProduct }) {
+  const [{ loading, data, error }, reload] = useLazy('/dashboard/rea');
+  const [syncing, setSyncing] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const syncMetafields = async () => {
+    setSyncing(true); setMsg(null);
+    try {
+      const r = await fetch(`${API_URL}/price-history/sync-metafields`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Synk misslyckades');
+      setMsg(`Lägsta pris skrivet till Shopify-metafält på ${d.written} varianter${d.errors?.length ? ` (${d.errors.length} fel)` : ''}. Temat kan nu visa det.`);
+    } catch (e) { setMsg(`Fel: ${e.message}`); }
+    finally { setSyncing(false); }
+  };
+
+  return (
+    <Card title="REA – lägsta pris 30 dagar" icon={Percent} span={6}
+      right={<button className="dash-link" onClick={() => reload(true)}><RefreshCw size={12} className={loading ? 'spin' : ''} /></button>}>
+      {loading && !data ? <Spinner /> : error ? <Err text={error} /> : data?.migrationMissing ? (
+        <Err text="Kör database/add-price-history.sql i Supabase för att aktivera prishistoriken." />
+      ) : data && (
+        <>
+          <div className="dash-stats">
+            <span><b>{data.summary?.onSale ?? 0}</b> produkter på rea</span>
+            {data.summary?.longestDays > 0 && <span>längst <b>{data.summary.longestDays}</b> dagar</span>}
+            {data.summary?.over14Days > 0 && <span style={{ color: '#c98a16' }}><AlertTriangle size={12} /> {data.summary.over14Days} över 14 dagar</span>}
+            {data.historyFrom && <span className="sub">historik från {data.historyFrom}</span>}
+          </div>
+          {data.items?.length ? (
+            <ul className="dash-list" style={{ maxHeight: 340, overflowY: 'auto' }}>
+              {data.items.map(r => (
+                <li key={r.sku} className={r.productId ? 'clickable' : ''} onClick={() => r.productId && onOpenProduct?.(r.productId)}>
+                  <span className="grow">
+                    <span className="title">{r.title || r.sku}</span>
+                    <span className="sub">{r.sku} · {r.saleDays} dagar på rea (−{r.discountPct} %)</span>
+                  </span>
+                  <span className="num">
+                    <s className="sub">{kr(r.compareAt)}</s> <b>{kr(r.price)}</b><br />
+                    <span className="sub">lägsta 30 dgr: {kr(r.displayLowest)}{r.approximate ? ' *' : ''}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : <div className="dash-empty"><CheckCircle2 size={14} color="#2f8f55" /> Inget på rea just nu.</div>}
+          <div className="dash-tile-sub" style={{ marginTop: 8 }}>
+            "Lägsta 30 dgr" = lägsta pris under 30 dagarna före prissänkningen (prisinformationslagen).{data.summary?.approximate ? ' * = historiken täcker ännu inte hela 30-dagarsfönstret.' : ''}
+          </div>
+          {msg && <div className="dash-tile-sub" style={{ marginTop: 6, color: msg.startsWith('Fel') ? '#b83a3a' : '#2f8f55' }}>{msg}</div>}
+          <div style={{ marginTop: 8 }}>
+            <button className="btn btn-secondary btn-sm" disabled={syncing || !data.items?.length} onClick={syncMetafields}>
+              {syncing ? <Loader2 size={13} className="spin" /> : <Upload size={13} />} Synka lägsta pris till Shopify (metafält)
+            </button>
+          </div>
+        </>
       )}
     </Card>
   );
@@ -389,6 +450,9 @@ export default function Dashboard({ onNavigate, onOpenProduct }) {
               </ul>
             ) : <div className="dash-empty"><CheckCircle2 size={14} color="#2f8f55" /> Inga produkter under golvpris.</div>}
           </Card>
+
+          {/* REA / lägsta pris */}
+          <SaleCard onOpenProduct={onOpenProduct} />
 
           {/* Merchant + Google */}
           <MerchantCard onNavigate={onNavigate} />

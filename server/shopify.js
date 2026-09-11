@@ -1380,7 +1380,7 @@ export const shopifySync = {
                 nodes {
                   title status
                   variants(first: 100) {
-                    nodes { sku price inventoryQuantity inventoryItem { id tracked unitCost { amount } } }
+                    nodes { id sku price compareAtPrice inventoryQuantity inventoryItem { id tracked unitCost { amount } } }
                   }
                 }
                 pageInfo { hasNextPage endCursor }
@@ -1412,6 +1412,8 @@ export const shopifySync = {
             tracked: v.inventoryItem.tracked,
             unitCost: v.inventoryItem.unitCost?.amount != null ? Number(v.inventoryItem.unitCost.amount) : null,
             price: v.price != null ? Number(v.price) : null,
+            compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
+            variantId: v.id, // GID
           });
         }
       }
