@@ -64,8 +64,8 @@ export default function SalesView({ onOpenProduct }) {
           <div className="pw-tiles">
             <div className="pw-tile"><div className="pw-tile-label"><ShoppingBag size={13} /> Omsättning</div><div className="pw-tile-value">{kr(t.revenue)}</div><div className="pw-tile-sub">{t.orders} ordrar · snitt {kr(t.avgOrder)}{(t.discount || t.saleDiscount) ? ` · rabatter ${kr((t.discount || 0) + (t.saleDiscount || 0))}` : ''}</div></div>
             <div className="pw-tile"><div className="pw-tile-label">Intäkt ex moms</div><div className="pw-tile-value">{kr(t.revenueExVat)}</div><div className="pw-tile-sub">moms {pct(s.vat)}</div></div>
-            <div className="pw-tile"><div className="pw-tile-label">Inköp + avgift</div><div className="pw-tile-value">{kr(t.purchase + t.fee)}</div><div className="pw-tile-sub">inköp {kr(t.purchase)} · avgift {kr(t.fee)}</div></div>
-            <div className="pw-tile"><div className="pw-tile-label"><Truck size={13} /> Frakt & transaktioner</div><div className="pw-tile-value">{kr((t.freight || 0) + (t.txFees || 0))}</div><div className="pw-tile-sub">Affari-frakt {kr(t.freight)} · betalavgifter {kr(t.txFees)}</div></div>
+            <div className="pw-tile"><div className="pw-tile-label"><Truck size={13} /> Till Affari totalt</div><div className="pw-tile-value">{kr(t.purchase + t.fee + (t.freight || 0))}</div><div className="pw-tile-sub">inköp {kr(t.purchase)} · avgift {kr(t.fee)} · frakt {kr(t.freight)}</div></div>
+            <div className="pw-tile"><div className="pw-tile-label">Betalavgifter</div><div className="pw-tile-value">{kr(t.txFees)}</div><div className="pw-tile-sub">Shopify Payments/Klarna, faktiska belopp</div></div>
             <div className="pw-tile" style={{ borderLeft: `3px solid ${profitColor(t.profit)}` }}><div className="pw-tile-label"><TrendingUp size={13} /> Bruttovinst</div><div className="pw-tile-value" style={{ color: profitColor(t.profit) }}>{kr(t.profit)}</div><div className="pw-tile-sub"><Percent size={11} /> marginal {pct(t.margin)}</div></div>
           </div>
 
@@ -135,8 +135,12 @@ export default function SalesView({ onOpenProduct }) {
                                   ))}
                                 </tbody>
                                 <tfoot>
+                                  <tr>
+                                    <td colSpan={8} className="pw-sub">Till Affari totalt: inköp {kr2(o.purchase)} + avgift {kr2(o.fee)}{o.freight ? ` + frakt ${kr2(o.freight)}` : ''}</td>
+                                    <td className="num" style={{ fontWeight: 600 }}>{kr2(o.purchase + o.fee + (o.freight || 0))}</td>
+                                  </tr>
                                   <tr style={{ fontWeight: 600 }}>
-                                    <td colSpan={8}>Summa produkter</td>
+                                    <td colSpan={8}>Summa produkter (vinst)</td>
                                     <td className="num">{kr2(o.lines.reduce((a, l) => a + (l.profit || 0), 0))}</td>
                                   </tr>
                                   {o.freight > 0 && (
