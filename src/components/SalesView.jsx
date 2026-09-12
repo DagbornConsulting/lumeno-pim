@@ -134,8 +134,24 @@ export default function SalesView({ onOpenProduct }) {
                                     </tr>
                                   ))}
                                 </tbody>
+                                <tfoot>
+                                  <tr style={{ fontWeight: 600 }}>
+                                    <td colSpan={8}>Summa produkter</td>
+                                    <td className="num">{kr2(o.lines.reduce((a, l) => a + (l.profit || 0), 0))}</td>
+                                  </tr>
+                                  {o.freight > 0 && (
+                                    <tr>
+                                      <td colSpan={8} className="pw-sub">− Affari-frakt (ordernivå, inköpsvärde under {kr(s?.freight_threshold ?? 700)})</td>
+                                      <td className="num" style={{ color: '#b83a3a' }}>−{kr2(o.freight)}</td>
+                                    </tr>
+                                  )}
+                                  <tr style={{ fontWeight: 700 }}>
+                                    <td colSpan={8}>= Ordervinst</td>
+                                    <td className="num" style={{ color: profitColor(o.profit) }}>{kr2(o.profit)}</td>
+                                  </tr>
+                                </tfoot>
                               </table>
-                              <div className="pw-sub" style={{ padding: '2px 8px 8px' }}>Transaktionsavgiften ({kr2(o.txFees)}{o.paymentRate ? `, ${o.paymentRate}` : ''}) är fördelad på raderna efter belopp. Affari-frakten ({o.freight ? kr(o.freight) : '0 kr'}) ligger kvar på ordernivå. "Rea" jämför mot produktens nuvarande jämförpris.</div>
+                              <div className="pw-sub" style={{ padding: '2px 8px 8px' }}>Transaktionsavgiften ({kr2(o.txFees)}{o.paymentRate ? `, ${o.paymentRate}` : ''}) är fördelad på raderna efter belopp. Affari-frakten ligger på ordernivå – den är lika stor oavsett antal produkter. "Rea" jämför mot produktens nuvarande jämförpris.</div>
                             </td>
                           </tr>
                         ),
