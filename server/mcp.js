@@ -67,7 +67,20 @@ const ARTICLE_FIELDS = 'id title handle isPublished publishedAt tags summary blo
 function buildServer(store) {
   const mcp = new McpServer({ name: 'lumeno-pim', version: '1.0.0' });
   const client = shopifySync.getClient(store);
-  const logga = (action, desc, changes) => db.logActivity(action, 'store', store.id, desc, changes, store.id).catch(() => {});
+  // Every write is logged WITH its before-state so it can be undone via the
+  // angra tool. Returns the log row id (= händelse-id).
+  const logga = async (action, desc, changes) => {
+    try {
+      const { data } = await supabase.from('activity_log')
+        .insert({ store_id: store.id, action, entity_type: 'store', entity_id: store.id, description: desc, changes })
+        .select('id').single();
+      return data?.id || null;
+    } catch (_) { return null; }
+  };
+  const lasArtikel = async (id) => {
+    const d = await client.graphql(`query($id: ID!) { article(id: $id) { ${ARTICLE_FIELDS} body author { name } } }`, { id: gid(id, 'Article') });
+    return d.article;
+  };
 
   mcp.tool(
     'skrivguide',
@@ -95,8 +108,8 @@ function buildServer(store) {
       const guide = await getGuide(store);
       const rule = { id: crypto.randomBytes(4).toString('hex'), text: regel.trim(), source: 'chatgpt', added_at: new Date().toISOString() };
       await saveGuide(store, [...guide.rules, rule]);
-      await logga('writing_rule_added', `Skrivguide: ny regel — "${rule.text}"`, { rule });
-      return ok({ sparad: rule, antalRegler: guide.rules.length + 1 });
+      const handelseId = await logga('writing_rule_added', `Skrivguide: ny regel — "${rule.text}"`, { rule });
+      return ok({ sparad: rule, antalRegler: guide.rules.length + 1, handelse_id: handelseId });
     }
   );
 
@@ -106,11 +119,12 @@ function buildServer(store) {
     { regel_id: z.string().describe('Regelns id') },
     async ({ regel_id }) => {
       const guide = await getGuide(store);
+      const removed = guide.rules.find(r => r.id === regel_id);
       const next = guide.rules.filter(r => r.id !== regel_id);
-      if (next.length === guide.rules.length) return fail(`Ingen regel med id ${regel_id}`);
+      if (!removed) return fail(`Ingen regel med id ${regel_id}`);
       await saveGuide(store, next);
-      await logga('writing_rule_removed', `Skrivguide: regel ${regel_id} borttagen`, { regel_id });
-      return ok({ borttagen: regel_id, antalRegler: next.length });
+      const handelseId = await logga('writing_rule_removed', `Skrivguide: regel ${regel_id} borttagen`, { rule: removed });
+      return ok({ borttagen: regel_id, antalRegler: next.length, handelse_id: handelseId });
     }
   );
 
@@ -166,9 +180,9 @@ function buildServer(store) {
       const errs = m.articleCreate?.userErrors || [];
       if (errs.length) return fail(errs.map(e => e.message).join('; '));
       const a = m.articleCreate.article;
-      await logga('blog_article_created', `Blogginlägg ${publicera ? 'publicerat' : 'skapat som utkast'} via MCP: "${a.title}"`, { articleId: numId(a.id), published: !!publicera });
+      const handelseId = await logga('blog_article_created', `Blogginlägg ${publicera ? 'publicerat' : 'skapat som utkast'} via MCP: "${a.title}"`, { articleId: numId(a.id), published: !!publicera });
       return ok({
-        skapad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast',
+        skapad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', handelse_id: handelseId,
         adminUrl: adminUrl(store, `/content/articles/${numId(a.id)}`),
         webbUrl: a.isPublished ? publicUrl(store, `/blogs/${a.blog.handle}/${a.handle}`) : null,
         notera: a.isPublished ? undefined : 'Utkast — be användaren granska via adminUrl och publicera där, eller uppdatera med publicera=true.',
@@ -195,15 +209,21 @@ function buildServer(store) {
       if (taggar !== undefined) article.tags = taggar;
       if (publicera !== undefined) article.isPublished = publicera;
       if (!Object.keys(article).length) return fail('Inget att uppdatera');
+      // Snapshot before-state so the change can be undone with angra.
+      const before = await lasArtikel(artikel_id);
+      if (!before) return fail('Artikeln hittades inte');
       const m = await client.graphql(
         `mutation($id: ID!, $article: ArticleUpdateInput!) { articleUpdate(id: $id, article: $article) { article { ${ARTICLE_FIELDS} } userErrors { field message } } }`,
         { id: gid(artikel_id, 'Article'), article });
       const errs = m.articleUpdate?.userErrors || [];
       if (errs.length) return fail(errs.map(e => e.message).join('; '));
       const a = m.articleUpdate.article;
-      await logga('blog_article_updated', `Blogginlägg uppdaterat via MCP: "${a.title}"${publicera === true ? ' (publicerat)' : publicera === false ? ' (avpublicerat)' : ''}`, { articleId: numId(a.id), fields: Object.keys(article) });
+      const handelseId = await logga('blog_article_updated', `Blogginlägg uppdaterat via MCP: "${a.title}"${publicera === true ? ' (publicerat)' : publicera === false ? ' (avpublicerat)' : ''}`, {
+        articleId: numId(a.id), fields: Object.keys(article),
+        before: { title: before.title, body: before.body, summary: before.summary, tags: before.tags, isPublished: before.isPublished },
+      });
       return ok({
-        uppdaterad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast',
+        uppdaterad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', handelse_id: handelseId,
         adminUrl: adminUrl(store, `/content/articles/${numId(a.id)}`),
         webbUrl: a.isPublished ? publicUrl(store, `/blogs/${a.blog.handle}/${a.handle}`) : null,
       });
@@ -226,6 +246,68 @@ function buildServer(store) {
         traffar: (data || []).map(p => ({ namn: p.title, typ: p.product_type, url: publicUrl(store, `/products/${p.handle}`) })),
         tips: (data || []).length ? undefined : 'Inga träffar — prova ett kortare sökord.',
       });
+    }
+  );
+
+  // --- Historik & ångra ----------------------------------------------------
+
+  const UNDOABLE = ['blog_article_created', 'blog_article_updated', 'writing_rule_added', 'writing_rule_removed'];
+
+  mcp.tool(
+    'historik',
+    'Visa de senaste ändringarna som gjorts via den här kopplingen (artiklar, skrivguide) med händelse-id — används tillsammans med angra när något blev fel.',
+    { antal: z.number().int().min(1).max(50).optional() },
+    async ({ antal }) => {
+      const { data, error } = await supabase.from('activity_log')
+        .select('id, action, description, changes, created_at')
+        .eq('store_id', store.id).in('action', UNDOABLE)
+        .order('created_at', { ascending: false }).limit(antal || 10);
+      if (error) return fail(error.message);
+      return ok((data || []).map(r => ({
+        handelse_id: r.id, nar: r.created_at, vad: r.description,
+        angerbar: !r.changes?.undone_at, ...(r.changes?.undone_at ? { angrad: r.changes.undone_at } : {}),
+      })));
+    }
+  );
+
+  mcp.tool(
+    'angra',
+    'Ångra en tidigare ändring gjord via den här kopplingen. Skapad artikel raderas; uppdaterad artikel återställs till hur den såg ut före ändringen; skrivguideregler läggs tillbaka/tas bort. Ange händelse-id från historik eller från verktygssvaret.',
+    { handelse_id: z.string().describe('Händelse-id (uuid)') },
+    async ({ handelse_id }) => {
+      const { data: ev, error } = await supabase.from('activity_log').select('*').eq('id', handelse_id).eq('store_id', store.id).single();
+      if (error || !ev) return fail('Händelsen hittades inte');
+      if (!UNDOABLE.includes(ev.action)) return fail(`Händelsen (${ev.action}) går inte att ångra`);
+      if (ev.changes?.undone_at) return fail(`Redan ångrad ${ev.changes.undone_at}`);
+
+      let result;
+      if (ev.action === 'blog_article_created') {
+        const m = await client.graphql('mutation($id: ID!) { articleDelete(id: $id) { deletedArticleId userErrors { message } } }', { id: gid(ev.changes.articleId, 'Article') });
+        const errs = m.articleDelete?.userErrors || [];
+        if (errs.length) return fail(errs.map(e => e.message).join('; '));
+        result = { raderadArtikel: ev.changes.articleId };
+      } else if (ev.action === 'blog_article_updated') {
+        const b = ev.changes.before;
+        if (!b) return fail('Före-läget saknas för den här händelsen (äldre ändring)');
+        const m = await client.graphql(
+          `mutation($id: ID!, $article: ArticleUpdateInput!) { articleUpdate(id: $id, article: $article) { article { id title isPublished } userErrors { field message } } }`,
+          { id: gid(ev.changes.articleId, 'Article'), article: { title: b.title, body: b.body, summary: b.summary ?? undefined, tags: b.tags ?? undefined, isPublished: b.isPublished } });
+        const errs = m.articleUpdate?.userErrors || [];
+        if (errs.length) return fail(errs.map(e => e.message).join('; '));
+        result = { aterstalldArtikel: ev.changes.articleId, titel: b.title, status: b.isPublished ? 'publicerad' : 'utkast' };
+      } else if (ev.action === 'writing_rule_added') {
+        const guide = await getGuide(store);
+        await saveGuide(store, guide.rules.filter(r => r.id !== ev.changes.rule?.id));
+        result = { borttagenRegel: ev.changes.rule?.id };
+      } else if (ev.action === 'writing_rule_removed') {
+        const guide = await getGuide(store);
+        await saveGuide(store, [...guide.rules, ev.changes.rule]);
+        result = { aterstalldRegel: ev.changes.rule?.id };
+      }
+
+      await supabase.from('activity_log').update({ changes: { ...(ev.changes || {}), undone_at: new Date().toISOString() } }).eq('id', ev.id);
+      await logga('mcp_undo', `Ångrade: ${ev.description}`, { undid: ev.id });
+      return ok({ angrad: true, handelse: ev.description, ...result });
     }
   );
 
