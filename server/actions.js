@@ -45,6 +45,7 @@ const OPENAPI = {
     '/actions/produkter': { get: { operationId: 'produktSok', 'x-openai-isConsequential': false, summary: 'Sök produkter (namn/SKU) för att länka till dem i texter. Använd ALLTID dessa URL:er, hitta aldrig på länkar.', parameters: [{ ...q('sokord', 'Del av produktnamn eller SKU'), required: true }], responses: RESP } },
     '/actions/historik': { get: { operationId: 'historik', 'x-openai-isConsequential': false, summary: 'Senaste ändringarna gjorda via assistenten, med händelse-id för ångra.', parameters: [q('antal', 'Max antal, standard 10', 'integer')], responses: RESP } },
     '/actions/angra': { post: { operationId: 'angra', 'x-openai-isConsequential': true, summary: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs till före-läget, guideregler läggs tillbaka/tas bort.', requestBody: { required: true, content: { 'application/json': { schema: P({ handelse_id: S.str }, ['handelse_id']) } } }, responses: RESP } },
+    '/actions/artikelplan': { get: { operationId: 'artikelplan', 'x-openai-isConsequential': false, summary: 'Strategisk artikelplan: 12-månaderskalender med målsökord, volymer, internlänkningsplan och AEO-vinkel. Förstahandskälla för vad som ska skrivas härnäst — stäm av mot bloggLista.', parameters: [q('manad', 'Filtrera på månad, t.ex. 2026-10'), q('prio', 'P1/P2/P3'), q('pelare', 'Pelarnamn')], responses: RESP } },
     '/actions/produkt': {
       get: { operationId: 'produktLas', 'x-openai-isConsequential': false, summary: 'Hämta en produkts fulla text (titel, HTML-beskrivning, SEO-fält, URL). Läs ALLTID innan du skriver om en produkttext.', parameters: [{ ...q('sku', 'Produktens SKU/artikelnummer'), required: true }], responses: RESP },
       post: { operationId: 'produktUppdateraText', 'x-openai-isConsequential': true, summary: 'Uppdatera en produkts titel, beskrivning och/eller SEO-titel/-beskrivning i Shopify. Läs produkten först (produktLas). Fakta ska komma från befintlig produktdata — hitta aldrig på egenskaper. Priser kan INTE ändras härifrån.', requestBody: { required: true, content: { 'application/json': { schema: P({ sku: S.str, titel: S.str, beskrivning_html: { ...S.str, description: 'Ny beskrivning som HTML: p/ul/strong, inga h1-h2' }, seo_titel: { ...S.str, description: 'Max 60 tecken' }, seo_beskrivning: { ...S.str, description: 'Max 155 tecken' } }, ['sku']) } } }, responses: RESP },
@@ -89,6 +90,7 @@ router.post('/artikel-uppdatera', run('artikelUppdatera', r => r.body || {}));
 router.get('/produkter', run('produktSok', r => ({ sokord: r.query.sokord })));
 router.get('/historik', run('historik', r => ({ antal: r.query.antal })));
 router.post('/angra', run('angra', r => r.body || {}));
+router.get('/artikelplan', run('artikelplan', r => ({ manad: r.query.manad, prio: r.query.prio, pelare: r.query.pelare })));
 router.get('/produkt', run('produktLas', r => ({ sku: r.query.sku })));
 router.post('/produkt', run('produktUppdateraText', r => r.body || {}));
 router.get('/oversikt', run('butiksoversikt'));

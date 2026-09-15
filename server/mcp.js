@@ -326,6 +326,21 @@ export function buildOps(store) {
       return { uppdaterad: true, sku: String(sku).trim(), titel: titel ?? before.titel, handelse_id: handelseId, adminUrl: adminUrl(store, `/products/${before.shopify_produkt_id}`), url: before.url };
     },
 
+    async artikelplan({ manad, prio, pelare } = {}) {
+      const plan = store.settings?.article_plan;
+      if (!plan?.artiklar?.length) throw new Error('Ingen artikelplan är importerad i PIM.');
+      let items = plan.artiklar;
+      if (manad) items = items.filter(a => a.publiceras.includes(String(manad)));
+      if (prio) items = items.filter(a => a.prio.toUpperCase() === String(prio).toUpperCase());
+      if (pelare) items = items.filter(a => a.pelare.toLowerCase().includes(String(pelare).toLowerCase()));
+      return {
+        beskrivning: plan.beskrivning, kalla: plan.kalla,
+        pelare: plan.pelare,
+        artiklar: items,
+        anvandning: 'Detta är den strategiska redaktionella kalendern. När du skriver en artikel från planen: använd målsökordet i titel och första stycket, följ AEO-vinkeln, internlänka till angivna collections/produkttyper (verifiera URL:er med produkt_sok), och stäm av mot blogg_lista så artikeln inte redan är skriven.',
+      };
+    },
+
     async butiksoversikt() {
       const cnt = async (f) => { const { count } = await f(supabase.from('products').select('*', { count: 'exact', head: true }).eq('store_id', store.id)); return count || 0; };
       const [aktiva, utkast, totalt] = await Promise.all([
@@ -436,6 +451,7 @@ const TOOLS = [
   { name: 'produkt_sok', op: 'produktSok', shape: { sokord: z.string().min(2) }, desc: 'Sök produkter (namn/SKU) för att länka till dem i artiklar.' },
   { name: 'historik', op: 'historik', shape: { antal: z.number().int().min(1).max(50).optional() }, desc: 'Visa senaste ändringarna gjorda via assistenten, med händelse-id för angra.' },
   { name: 'angra', op: 'angra', shape: { handelse_id: z.string() }, desc: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs, guideregler läggs tillbaka/tas bort.' },
+  { name: 'artikelplan', op: 'artikelplan', shape: { manad: z.string().optional().describe('Filtrera på månad, t.ex. 2026-10'), prio: z.string().optional().describe('P1/P2/P3'), pelare: z.string().optional() }, desc: 'Butikens strategiska artikelplan (12-månaderskalender med målsökord, sökvolymer, internlänkningsplan och AEO-vinkel per artikel). Använd som förstahandskälla när användaren vill veta vad som ska skrivas härnäst.' },
   { name: 'produkt_las', op: 'produktLas', shape: { sku: z.string().min(2).describe('Produktens SKU (artikelnummer)') }, desc: 'Hämta en produkts fulla text: titel, beskrivning (HTML), SEO-titel/-beskrivning, taggar och URL. Läs ALLTID innan du skriver om en produkttext.' },
   { name: 'produkt_uppdatera_text', op: 'produktUppdateraText', shape: { sku: z.string().min(2), titel: z.string().min(3).max(255).optional(), beskrivning_html: z.string().min(50).optional().describe('Ny produktbeskrivning som HTML (p/ul/strong, inga rubriker h1-h2)'), seo_titel: z.string().max(70).optional(), seo_beskrivning: z.string().max(320).optional() }, desc: 'Uppdatera en produkts titel, beskrivning och/eller SEO-fält i Shopify (speglas till PIM). Läs produkten först. Ändra ALDRIG priser — det går inte härifrån. Fakta måste komma från befintlig produktdata.' },
   { name: 'butiksoversikt', op: 'butiksoversikt', shape: {}, desc: 'Snabb överblick av butiken: antal produkter (totalt/aktiva/utkast), varianter, produkter på rea, försäljning senaste 30 dagarna och bloggens storlek.' },
