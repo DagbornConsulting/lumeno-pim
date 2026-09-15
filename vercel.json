@@ -13,7 +13,8 @@
   ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/[...slug]" },
-    { "source": "/((?!api/).*)", "destination": "/" }
+    { "source": "/mcp/(.*)", "destination": "/api/[...slug]" },
+    { "source": "/((?!api/|mcp/).*)", "destination": "/" }
   ],
   "headers": [
     {

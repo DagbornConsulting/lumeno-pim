@@ -549,6 +549,12 @@ app.use((req, res, next) => {
   return requireAuth(req, res, next);
 });
 
+// MCP-server (ChatGPT/Claude-koppling för blogg + skrivguide). Ligger utanför
+// /api så session-middlewaren ovan gäller inte — den skyddas av MCP_SECRET i
+// sin egen router och exponerar bara blogg/skrivguide/produktsök.
+const { default: mcpRouter } = await import('./mcp.js');
+app.use('/mcp', mcpRouter);
+
 // Health / ping — no auth, no DB
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
