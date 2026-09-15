@@ -29,6 +29,9 @@ const DEFAULT_RULES = [
   'Mått skrivs som Ø12 × H23 cm. Priser nämns inte i bloggtexter (de ändras).',
   'Avsluta med en mjuk uppmaning, t.ex. att utforska en kollektion — inte "KÖP NU".',
   'Artikeln ska vara 400–800 ord och svara på en fråga läsaren faktiskt har (AEO): tänk "hur", "vilken", "när".',
+  'Hitta ALDRIG på fakta: produktegenskaper, material, mått och skötselråd måste komma från butikens egen data (produkt_sok / artikel_las) — inte från antaganden.',
+  'Nämn bara produkter, kollektioner och erbjudanden som verifierats finnas i butiken via verktygen. Inga påhittade recensioner, citat, siffror eller garantier.',
+  'Kan ett påstående inte verifieras: skriv om texten utan påståendet, eller fråga användaren — gissa aldrig.',
 ];
 
 const gid = (id, type) => String(id).startsWith('gid://') ? String(id) : `gid://shopify/${type}/${String(id).trim()}`;
