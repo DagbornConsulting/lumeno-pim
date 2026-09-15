@@ -16,6 +16,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { db, supabase } from './db.js';
 import shopifySync from './shopify.js';
+import * as googleSeo from './services/google-seo.js';
+import * as shopifySales from './services/shopify-sales.js';
+import * as priceHistory from './services/price-history.js';
 
 const router = express.Router();
 
@@ -222,6 +225,99 @@ function buildServer(store) {
       return ok({
         traffar: (data || []).map(p => ({ namn: p.title, typ: p.product_type, url: publicUrl(store, `/products/${p.handle}`) })),
         tips: (data || []).length ? undefined : 'Inga träffar — prova ett kortare sökord.',
+      });
+    }
+  );
+
+  // --- Datadrivet innehåll (läsverktyg) -----------------------------------
+
+  const ymdAgo = n => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+
+  mcp.tool(
+    'sokdata',
+    'Google Search Console-data: vad folk söker på när de hittar (eller borde hitta) butiken. Använd för artikelidéer — sökfrågor med många visningar men få klick eller dålig position är ämnen värda en artikel. Jämför med blogg_lista så du inte skriver om något som redan finns.',
+    { dagar: z.number().int().min(7).max(90).optional().describe('Period bakåt, standard 28 dagar') },
+    async ({ dagar }) => {
+      const siteUrl = store.settings?.google?.gsc_site_url;
+      if (!googleSeo.isConfigured() || !siteUrl) return fail('Search Console är inte kopplad i PIM ännu (SEO & Insikter).');
+      const d = dagar || 28;
+      const rows = await googleSeo.gscSearchAnalytics({ siteUrl, startDate: ymdAgo(d), endDate: ymdAgo(1), dimensions: ['query'], rowLimit: 100 });
+      const fm = r => ({ sokfraga: r.query, klick: r.clicks, visningar: r.impressions, ctr: Math.round(r.ctr * 1000) / 10 + ' %', position: Math.round(r.position * 10) / 10 });
+      return ok({
+        period: `${ymdAgo(d)} – ${ymdAgo(1)}`,
+        toppSokfragor: rows.slice(0, 25).map(fm),
+        artikelmojligheter: rows
+          .filter(r => r.impressions >= 30 && (r.position > 8 || (r.ctr < 0.02 && r.position > 3)))
+          .slice(0, 20).map(fm),
+        tips: 'En bra artikel svarar på sökfrågan i rubriken och första stycket. Kolla blogg_lista först.',
+      });
+    }
+  );
+
+  mcp.tool(
+    'trafikdata',
+    'Trafiköversikt: GA4 (sessioner, köp, intäkt) och mest besökta sidorna från Google-sök. Bra underlag för att förstå vad som engagerar.',
+    { dagar: z.number().int().min(7).max(90).optional() },
+    async ({ dagar }) => {
+      const g = store.settings?.google || {};
+      if (!googleSeo.isConfigured() || (!g.gsc_site_url && !g.ga4_property_id)) return fail('Google-kopplingen är inte klar i PIM ännu (SEO & Insikter).');
+      const d = dagar || 28;
+      const out = { period: `${ymdAgo(d)} – ${ymdAgo(1)}` };
+      if (g.ga4_property_id) {
+        try {
+          const rep = await googleSeo.ga4RunReport({ propertyId: g.ga4_property_id, startDate: `${d}daysAgo`, endDate: 'yesterday', metrics: ['sessions', 'ecommercePurchases', 'purchaseRevenue'] });
+          const r = rep.rows[0] || {};
+          out.ga4 = { sessioner: r.sessions || 0, kop: r.ecommercePurchases || 0, intakt: Math.round(r.purchaseRevenue || 0) + ' kr' };
+        } catch (e) { out.ga4 = { fel: e.message }; }
+      }
+      if (g.gsc_site_url) {
+        try {
+          const pages = await googleSeo.gscSearchAnalytics({ siteUrl: g.gsc_site_url, startDate: ymdAgo(d), endDate: ymdAgo(1), dimensions: ['page'], rowLimit: 20 });
+          out.toppsidorFranGoogle = pages.map(p => ({ sida: p.page, klick: p.clicks, visningar: p.impressions }));
+        } catch (e) { out.toppsidorFranGoogle = { fel: e.message }; }
+      }
+      return ok(out);
+    }
+  );
+
+  mcp.tool(
+    'toppsaljare',
+    'Bäst säljande produkter (antal + omsättning) för perioden, med butiks-URL:er — för nyhetsbrev, artiklar och "populärast just nu"-innehåll.',
+    { dagar: z.number().int().min(7).max(365).optional().describe('Standard 30 dagar') },
+    async ({ dagar }) => {
+      const sales = await shopifySales.getSales(store, { days: dagar || 30 });
+      const skus = sales.top.map(t => t.sku).filter(Boolean);
+      const { data: prods } = await supabase.from('products').select('sku, handle, status').eq('store_id', store.id).in('sku', skus.length ? skus : ['-']);
+      const bySku = new Map((prods || []).map(p => [p.sku, p]));
+      return ok({
+        period: `senaste ${dagar || 30} dagarna`,
+        totalt: { ordrar: sales.orders30, omsattning: sales.revenue30 + ' kr' },
+        toppsaljare: sales.top.map(t => {
+          const p = bySku.get(t.sku);
+          return { namn: t.title, antal: t.units, omsattning: t.revenue + ' kr', url: p?.handle ? publicUrl(store, `/products/${p.handle}`) : null, status: p?.status };
+        }),
+      });
+    }
+  );
+
+  mcp.tool(
+    'nyhetsbrev_underlag',
+    'Samlat underlag för ett nyhetsbrev: toppsäljare, nyinkomna produkter och pågående rea (med lagenligt "lägsta pris 30 dagar"). Skriv nyhetsbrevet enligt skrivguiden och lämna texten till användaren — den skickas inte automatiskt.',
+    { dagar: z.number().int().min(7).max(90).optional().describe('Försäljningsperiod, standard 30 dagar') },
+    async ({ dagar }) => {
+      const [sales, rea, nya] = await Promise.all([
+        shopifySales.getSales(store, { days: dagar || 30 }).catch(e => ({ error: e.message })),
+        priceHistory.saleReport(store.id).catch(e => ({ error: e.message, items: [] })),
+        supabase.from('products').select('title, handle, created_at').eq('store_id', store.id).eq('status', 'active').or('is_staged.is.null,is_staged.eq.false').order('created_at', { ascending: false }).limit(8),
+      ]);
+      const skus = (sales.top || []).map(t => t.sku).filter(Boolean);
+      const { data: prods } = await supabase.from('products').select('sku, handle').eq('store_id', store.id).in('sku', skus.length ? skus : ['-']);
+      const bySku = new Map((prods || []).map(p => [p.sku, p]));
+      return ok({
+        toppsaljare: (sales.top || []).slice(0, 6).map(t => ({ namn: t.title, antal: t.units, url: bySku.get(t.sku)?.handle ? publicUrl(store, `/products/${bySku.get(t.sku).handle}`) : null })),
+        nyaProdukter: (nya.data || []).map(p => ({ namn: p.title, url: publicUrl(store, `/products/${p.handle}`), inkom: String(p.created_at).slice(0, 10) })),
+        pagaendeRea: (rea.items || []).slice(0, 10).map(r => ({ namn: r.title, pris: r.price + ' kr', ordinarie: r.compareAt + ' kr', lagsta30dgr: r.displayLowest + ' kr', url: null })),
+        viktigt: 'Vid reapriser i nyhetsbrevet MÅSTE "Lägsta pris senaste 30 dagarna" anges (prisinformationslagen) — använd lagsta30dgr-värdet. Skriv enligt skrivguiden och ge texten till användaren för utskick.',
       });
     }
   );
