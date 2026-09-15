@@ -16,7 +16,10 @@ const PROD_URL = 'https://lumeno-pim.vercel.app';
 // --- OpenAPI-spec (öppen, importeras av GPT-editorn) ------------------------
 const P = (props, required = []) => ({ type: 'object', properties: props, ...(required.length ? { required } : {}) });
 const S = { str: { type: 'string' }, int: { type: 'integer' }, bool: { type: 'boolean' }, arr: { type: 'array', items: { type: 'string' } } };
-const RESP = { 200: { description: 'OK', content: { 'application/json': { schema: { type: 'object' } } } } };
+// GPT-editorns validator kräver `properties` på objektscheman och en
+// components.schemas-sektion — svaren är fria JSON-objekt, så vi deklarerar
+// ett tomt properties-objekt med additionalProperties.
+const RESP = { 200: { description: 'OK', content: { 'application/json': { schema: { type: 'object', properties: {}, additionalProperties: true } } } } };
 const q = (name, desc, type = 'string') => ({ name, in: 'query', required: false, description: desc, schema: { type } });
 
 const OPENAPI = {
@@ -27,7 +30,7 @@ const OPENAPI = {
     description: 'Bloggskrivande och butiksdata för Lumeno Home. Läs alltid skrivguiden innan du skriver. Nya artiklar skapas som utkast om inte publicering uttryckligen begärts.',
   },
   servers: [{ url: PROD_URL }],
-  components: { securitySchemes: { ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key' } } },
+  components: { schemas: {}, securitySchemes: { ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key' } } },
   security: [{ ApiKeyAuth: [] }],
   paths: {
     '/actions/skrivguide': { get: { operationId: 'skrivguide', 'x-openai-isConsequential': false, summary: 'Hämta skrivguiden (tonalitet, regler, format) och blogglistan. Läs ALLTID denna före skrivande.', responses: RESP } },
