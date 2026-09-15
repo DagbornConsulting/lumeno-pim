@@ -32,6 +32,7 @@ const DEFAULT_RULES = [
   'Hitta ALDRIG på fakta: produktegenskaper, material, mått och skötselråd måste komma från butikens egen data (produkt_sok / artikel_las) — inte från antaganden.',
   'Nämn bara produkter, kollektioner och erbjudanden som verifierats finnas i butiken via verktygen. Inga påhittade recensioner, citat, siffror eller garantier.',
   'Kan ett påstående inte verifieras: skriv om texten utan påståendet, eller fråga användaren — gissa aldrig.',
+  'Sätt alltid seo_titel (max 60 tecken, huvudsökordet tidigt) och seo_beskrivning (max 155 tecken, ska locka till klick) på varje artikel.',
 ];
 
 const gid = (id, type) => String(id).startsWith('gid://') ? String(id) : `gid://shopify/${type}/${String(id).trim()}`;
@@ -78,8 +79,20 @@ export function buildOps(store) {
     } catch (_) { return null; }
   };
   const lasArtikel = async (id) => {
-    const d = await client.graphql(`query($id: ID!) { article(id: $id) { ${ARTICLE_FIELDS} body author { name } } }`, { id: gid(id, 'Article') });
+    const d = await client.graphql(`query($id: ID!) { article(id: $id) { ${ARTICLE_FIELDS} body author { name }
+      seoT: metafield(namespace: "global", key: "title_tag") { value }
+      seoD: metafield(namespace: "global", key: "description_tag") { value } } }`, { id: gid(id, 'Article') });
     return d.article;
+  };
+  // Article SEO lives in the global.title_tag/description_tag metafields.
+  const sattArtikelSeo = async (articleId, { titel, beskrivning }) => {
+    const set = [];
+    if (titel !== undefined && titel !== null && String(titel).trim()) set.push({ ownerId: gid(articleId, 'Article'), namespace: 'global', key: 'title_tag', type: 'single_line_text_field', value: String(titel).trim().slice(0, 70) });
+    if (beskrivning !== undefined && beskrivning !== null && String(beskrivning).trim()) set.push({ ownerId: gid(articleId, 'Article'), namespace: 'global', key: 'description_tag', type: 'multi_line_text_field', value: String(beskrivning).trim().slice(0, 320) });
+    if (!set.length) return;
+    const m = await client.graphql('mutation($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { userErrors { field message } } }', { m: set });
+    const errs = m.metafieldsSet?.userErrors || [];
+    if (errs.length) throw new Error('SEO-fält: ' + errs.map(e => e.message).join('; '));
   };
   const forstaBloggId = async () => numId((await client.graphql('{ blogs(first: 1) { nodes { id } } }')).blogs.nodes[0].id);
 
@@ -133,10 +146,10 @@ export function buildOps(store) {
     async artikelLas({ artikel_id }) {
       const a = await lasArtikel(artikel_id);
       if (!a) throw new Error('Artikeln hittades inte');
-      return { id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', taggar: a.tags, sammanfattning: a.summary, forfattare: a.author?.name, html: a.body };
+      return { id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', taggar: a.tags, sammanfattning: a.summary, forfattare: a.author?.name, seo_titel: a.seoT?.value ?? null, seo_beskrivning: a.seoD?.value ?? null, html: a.body };
     },
 
-    async artikelSkapa({ titel, html, sammanfattning, taggar, blogg_id, publicera, forfattare }) {
+    async artikelSkapa({ titel, html, sammanfattning, taggar, blogg_id, publicera, forfattare, seo_titel, seo_beskrivning }) {
       if (!titel || String(titel).length < 5) throw new Error('Titel saknas eller är för kort');
       if (!html || String(html).length < 200) throw new Error('HTML-brödtexten är för kort (minst 200 tecken)');
       const blogGid = gid(blogg_id || await forstaBloggId(), 'Blog');
@@ -146,34 +159,41 @@ export function buildOps(store) {
       const errs = m.articleCreate?.userErrors || [];
       if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
       const a = m.articleCreate.article;
+      await sattArtikelSeo(numId(a.id), { titel: seo_titel || titel, beskrivning: seo_beskrivning || sammanfattning });
       const handelseId = await logga('blog_article_created', `Blogginlägg ${publicera ? 'publicerat' : 'skapat som utkast'} via assistent: "${a.title}"`, { articleId: numId(a.id), published: !!publicera });
       return {
         skapad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', handelse_id: handelseId,
+        seo: { titel: (seo_titel || titel || '').slice(0, 70), beskrivning: (seo_beskrivning || sammanfattning || '') ? (seo_beskrivning || sammanfattning).slice(0, 160) : '(saknas — sätt seo_beskrivning!)' },
         adminUrl: adminUrl(store, `/content/articles/${numId(a.id)}`),
         webbUrl: a.isPublished ? publicUrl(store, `/blogs/${a.blog.handle}/${a.handle}`) : null,
         notera: a.isPublished ? undefined : 'Utkast — be användaren granska via adminUrl och publicera där, eller uppdatera med publicera=true.',
       };
     },
 
-    async artikelUppdatera({ artikel_id, titel, html, sammanfattning, taggar, publicera }) {
+    async artikelUppdatera({ artikel_id, titel, html, sammanfattning, taggar, publicera, seo_titel, seo_beskrivning }) {
       const article = {};
       if (titel !== undefined) article.title = titel;
       if (html !== undefined) article.body = html;
       if (sammanfattning !== undefined) article.summary = sammanfattning;
       if (taggar !== undefined) article.tags = taggar;
       if (publicera !== undefined) article.isPublished = publicera;
-      if (!Object.keys(article).length) throw new Error('Inget att uppdatera');
+      const harSeo = seo_titel !== undefined || seo_beskrivning !== undefined;
+      if (!Object.keys(article).length && !harSeo) throw new Error('Inget att uppdatera');
       const before = await lasArtikel(artikel_id);
       if (!before) throw new Error('Artikeln hittades inte');
-      const m = await client.graphql(
-        `mutation($id: ID!, $article: ArticleUpdateInput!) { articleUpdate(id: $id, article: $article) { article { ${ARTICLE_FIELDS} } userErrors { field message } } }`,
-        { id: gid(artikel_id, 'Article'), article });
-      const errs = m.articleUpdate?.userErrors || [];
-      if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
-      const a = m.articleUpdate.article;
+      let a = before;
+      if (Object.keys(article).length) {
+        const m = await client.graphql(
+          `mutation($id: ID!, $article: ArticleUpdateInput!) { articleUpdate(id: $id, article: $article) { article { ${ARTICLE_FIELDS} } userErrors { field message } } }`,
+          { id: gid(artikel_id, 'Article'), article });
+        const errs = m.articleUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+        a = m.articleUpdate.article;
+      }
+      if (harSeo) await sattArtikelSeo(artikel_id, { titel: seo_titel, beskrivning: seo_beskrivning });
       const handelseId = await logga('blog_article_updated', `Blogginlägg uppdaterat via assistent: "${a.title}"${publicera === true ? ' (publicerat)' : publicera === false ? ' (avpublicerat)' : ''}`, {
         articleId: numId(a.id), fields: Object.keys(article),
-        before: { title: before.title, body: before.body, summary: before.summary, tags: before.tags, isPublished: before.isPublished },
+        before: { title: before.title, body: before.body, summary: before.summary, tags: before.tags, isPublished: before.isPublished, seoTitel: before.seoT?.value ?? null, seoBeskrivning: before.seoD?.value ?? null },
       });
       return {
         uppdaterad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', handelse_id: handelseId,
@@ -229,6 +249,9 @@ export function buildOps(store) {
           { id: gid(ev.changes.articleId, 'Article'), article: { title: b.title, body: b.body, summary: b.summary ?? undefined, tags: b.tags ?? undefined, isPublished: b.isPublished } });
         const errs = m.articleUpdate?.userErrors || [];
         if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+        if (b.seoTitel != null || b.seoBeskrivning != null) {
+          try { await sattArtikelSeo(ev.changes.articleId, { titel: b.seoTitel, beskrivning: b.seoBeskrivning }); } catch (_) {}
+        }
         result = { aterstalldArtikel: ev.changes.articleId, titel: b.title, status: b.isPublished ? 'publicerad' : 'utkast' };
       } else if (ev.action === 'writing_rule_added') {
         const guide = await getGuide(store);
@@ -350,8 +373,8 @@ const TOOLS = [
   { name: 'ta_bort_lardom', op: 'taBortLardom', shape: { regel_id: z.string() }, desc: 'Ta bort en regel ur skrivguiden (id från skrivguide-verktyget).' },
   { name: 'blogg_lista', op: 'bloggLista', shape: { blogg_id: z.string().optional() }, desc: 'Lista bloggens artiklar — undvik dubbletter, hitta internlänkar och artikel-id för redigering.' },
   { name: 'artikel_las', op: 'artikelLas', shape: { artikel_id: z.string() }, desc: 'Hämta en artikels fulla innehåll (HTML) inför redigering.' },
-  { name: 'artikel_skapa', op: 'artikelSkapa', shape: { titel: z.string().min(5).max(255), html: z.string().min(200), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), blogg_id: z.string().optional(), publicera: z.boolean().optional(), forfattare: z.string().optional() }, desc: 'Skapa ett nytt blogginlägg i Shopify. UTKAST om inte publicera=true uttryckligen begärts. Följ skrivguiden. Svara med admin-länken.' },
-  { name: 'artikel_uppdatera', op: 'artikelUppdatera', shape: { artikel_id: z.string(), titel: z.string().min(5).max(255).optional(), html: z.string().min(50).optional(), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), publicera: z.boolean().optional() }, desc: 'Uppdatera ett blogginlägg och/eller publicera/avpublicera. Läs artikeln först så inget tappas.' },
+  { name: 'artikel_skapa', op: 'artikelSkapa', shape: { titel: z.string().min(5).max(255), html: z.string().min(200), seo_titel: z.string().max(70).optional().describe('SEO-titel, max 60 tecken, huvudsökordet tidigt'), seo_beskrivning: z.string().max(320).optional().describe('Meta-beskrivning, max 155 tecken'), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), blogg_id: z.string().optional(), publicera: z.boolean().optional(), forfattare: z.string().optional() }, desc: 'Skapa ett nytt blogginlägg i Shopify. UTKAST om inte publicera=true uttryckligen begärts. Sätt ALLTID seo_titel och seo_beskrivning. Följ skrivguiden. Svara med admin-länken.' },
+  { name: 'artikel_uppdatera', op: 'artikelUppdatera', shape: { artikel_id: z.string(), titel: z.string().min(5).max(255).optional(), html: z.string().min(50).optional(), seo_titel: z.string().max(70).optional(), seo_beskrivning: z.string().max(320).optional(), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), publicera: z.boolean().optional() }, desc: 'Uppdatera ett blogginlägg (inkl. SEO-titel/-beskrivning) och/eller publicera/avpublicera. Läs artikeln först så inget tappas.' },
   { name: 'produkt_sok', op: 'produktSok', shape: { sokord: z.string().min(2) }, desc: 'Sök produkter (namn/SKU) för att länka till dem i artiklar.' },
   { name: 'historik', op: 'historik', shape: { antal: z.number().int().min(1).max(50).optional() }, desc: 'Visa senaste ändringarna gjorda via assistenten, med händelse-id för angra.' },
   { name: 'angra', op: 'angra', shape: { handelse_id: z.string() }, desc: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs, guideregler läggs tillbaka/tas bort.' },
