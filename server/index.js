@@ -554,6 +554,9 @@ app.use((req, res, next) => {
 // sin egen router och exponerar bara blogg/skrivguide/produktsök.
 const { default: mcpRouter } = await import('./mcp.js');
 app.use('/mcp', mcpRouter);
+// REST/Actions-variant av samma verktyg — för Custom GPT (ChatGPT Plus).
+const { default: actionsRouter } = await import('./actions.js');
+app.use('/actions', actionsRouter);
 
 // Health / ping — no auth, no DB
 app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
