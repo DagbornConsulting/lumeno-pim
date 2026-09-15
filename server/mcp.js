@@ -62,7 +62,7 @@ const publicUrl = (store, path) => `https://${store.custom_domain || store.domai
 const adminUrl = (store, path) => `https://admin.shopify.com/store/${String(store.domain).replace('.myshopify.com', '')}${path}`;
 
 const ARTICLE_FIELDS = 'id title handle isPublished publishedAt tags summary blog { id title handle }';
-const UNDOABLE = ['blog_article_created', 'blog_article_updated', 'writing_rule_added', 'writing_rule_removed'];
+const UNDOABLE = ['blog_article_created', 'blog_article_updated', 'writing_rule_added', 'writing_rule_removed', 'product_text_updated'];
 
 // ============================================================
 // Operationerna — delas av MCP och REST/Actions. Kastar Error vid fel.
@@ -253,6 +253,15 @@ export function buildOps(store) {
           try { await sattArtikelSeo(ev.changes.articleId, { titel: b.seoTitel, beskrivning: b.seoBeskrivning }); } catch (_) {}
         }
         result = { aterstalldArtikel: ev.changes.articleId, titel: b.title, status: b.isPublished ? 'publicerad' : 'utkast' };
+      } else if (ev.action === 'product_text_updated') {
+        const b = ev.changes.before;
+        if (!b) throw new Error('Före-läget saknas');
+        const m = await client.graphql('mutation($input: ProductInput!) { productUpdate(input: $input) { product { id } userErrors { field message } } }',
+          { input: { id: gid(ev.changes.shopifyProductId, 'Product'), title: b.title, descriptionHtml: b.descriptionHtml, seo: { title: b.seoTitle, description: b.seoDescription } } });
+        const errs = m.productUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+        await supabase.from('products').update({ title: b.title, description: b.descriptionHtml, seo_title: b.seoTitle, seo_description: b.seoDescription }).eq('store_id', store.id).eq('sku', ev.changes.sku);
+        result = { aterstalldProdukt: ev.changes.sku, titel: b.title };
       } else if (ev.action === 'writing_rule_added') {
         const guide = await getGuide(store);
         await saveGuide(store, guide.rules.filter(r => r.id !== ev.changes.rule?.id));
@@ -266,6 +275,55 @@ export function buildOps(store) {
       await supabase.from('activity_log').update({ changes: { ...(ev.changes || {}), undone_at: new Date().toISOString() } }).eq('id', ev.id);
       await logga('mcp_undo', `Ångrade: ${ev.description}`, { undid: ev.id });
       return { angrad: true, handelse: ev.description, ...result };
+    },
+
+    async produktLas({ sku }) {
+      if (!sku) throw new Error('Ange SKU');
+      const { data: p } = await supabase.from('products').select('id, sku, title, handle, status, shopify_product_id').eq('store_id', store.id).eq('sku', String(sku).trim()).maybeSingle();
+      let shopifyId = p?.shopify_product_id;
+      if (!shopifyId && p) {
+        const { data: link } = await supabase.from('store_products').select('shopify_product_id').eq('store_id', store.id).eq('product_id', p.id).maybeSingle();
+        shopifyId = link?.shopify_product_id;
+      }
+      if (!shopifyId) {
+        const d = await client.graphql('query($q: String!) { productVariants(first: 3, query: $q) { nodes { product { id } sku } } }', { q: `sku:${String(sku).trim()}` });
+        shopifyId = d.productVariants.nodes.find(v => String(v.sku).trim() === String(sku).trim())?.product?.id;
+      }
+      if (!shopifyId) throw new Error(`Hittar ingen produkt med SKU ${sku}`);
+      const d = await client.graphql(`query($id: ID!) { product(id: $id) { id title handle status descriptionHtml productType tags seo { title description } } }`, { id: gid(numId(shopifyId), 'Product') });
+      const prod = d.product;
+      if (!prod) throw new Error('Produkten hittades inte i Shopify');
+      return {
+        shopify_produkt_id: numId(prod.id), sku: String(sku).trim(), titel: prod.title, status: prod.status,
+        typ: prod.productType, taggar: prod.tags,
+        seo_titel: prod.seo?.title || null, seo_beskrivning: prod.seo?.description || null,
+        beskrivning_html: prod.descriptionHtml,
+        url: publicUrl(store, `/products/${prod.handle}`),
+      };
+    },
+
+    async produktUppdateraText({ sku, titel, beskrivning_html, seo_titel, seo_beskrivning }) {
+      const before = await this.produktLas({ sku });
+      const input = { id: gid(before.shopify_produkt_id, 'Product') };
+      if (titel !== undefined) input.title = titel;
+      if (beskrivning_html !== undefined) input.descriptionHtml = beskrivning_html;
+      if (seo_titel !== undefined || seo_beskrivning !== undefined) input.seo = { ...(seo_titel !== undefined ? { title: seo_titel } : {}), ...(seo_beskrivning !== undefined ? { description: seo_beskrivning } : {}) };
+      if (Object.keys(input).length === 1) throw new Error('Inget att uppdatera');
+      const m = await client.graphql('mutation($input: ProductInput!) { productUpdate(input: $input) { product { id title } userErrors { field message } } }', { input });
+      const errs = m.productUpdate?.userErrors || [];
+      if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+      // Spegla till PIM så katalogen stämmer direkt.
+      const pim = {};
+      if (titel !== undefined) pim.title = titel;
+      if (beskrivning_html !== undefined) pim.description = beskrivning_html;
+      if (seo_titel !== undefined) pim.seo_title = seo_titel;
+      if (seo_beskrivning !== undefined) pim.seo_description = seo_beskrivning;
+      if (Object.keys(pim).length) await supabase.from('products').update(pim).eq('store_id', store.id).eq('sku', String(sku).trim());
+      const handelseId = await logga('product_text_updated', `Produkttext uppdaterad via assistent: "${before.titel}" (${sku})${titel !== undefined ? ' [titel]' : ''}${beskrivning_html !== undefined ? ' [beskrivning]' : ''}${input.seo ? ' [SEO]' : ''}`, {
+        sku: String(sku).trim(), shopifyProductId: before.shopify_produkt_id, fields: Object.keys(input).filter(k => k !== 'id'),
+        before: { title: before.titel, descriptionHtml: before.beskrivning_html, seoTitle: before.seo_titel, seoDescription: before.seo_beskrivning },
+      });
+      return { uppdaterad: true, sku: String(sku).trim(), titel: titel ?? before.titel, handelse_id: handelseId, adminUrl: adminUrl(store, `/products/${before.shopify_produkt_id}`), url: before.url };
     },
 
     async butiksoversikt() {
@@ -378,6 +436,8 @@ const TOOLS = [
   { name: 'produkt_sok', op: 'produktSok', shape: { sokord: z.string().min(2) }, desc: 'Sök produkter (namn/SKU) för att länka till dem i artiklar.' },
   { name: 'historik', op: 'historik', shape: { antal: z.number().int().min(1).max(50).optional() }, desc: 'Visa senaste ändringarna gjorda via assistenten, med händelse-id för angra.' },
   { name: 'angra', op: 'angra', shape: { handelse_id: z.string() }, desc: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs, guideregler läggs tillbaka/tas bort.' },
+  { name: 'produkt_las', op: 'produktLas', shape: { sku: z.string().min(2).describe('Produktens SKU (artikelnummer)') }, desc: 'Hämta en produkts fulla text: titel, beskrivning (HTML), SEO-titel/-beskrivning, taggar och URL. Läs ALLTID innan du skriver om en produkttext.' },
+  { name: 'produkt_uppdatera_text', op: 'produktUppdateraText', shape: { sku: z.string().min(2), titel: z.string().min(3).max(255).optional(), beskrivning_html: z.string().min(50).optional().describe('Ny produktbeskrivning som HTML (p/ul/strong, inga rubriker h1-h2)'), seo_titel: z.string().max(70).optional(), seo_beskrivning: z.string().max(320).optional() }, desc: 'Uppdatera en produkts titel, beskrivning och/eller SEO-fält i Shopify (speglas till PIM). Läs produkten först. Ändra ALDRIG priser — det går inte härifrån. Fakta måste komma från befintlig produktdata.' },
   { name: 'butiksoversikt', op: 'butiksoversikt', shape: {}, desc: 'Snabb överblick av butiken: antal produkter (totalt/aktiva/utkast), varianter, produkter på rea, försäljning senaste 30 dagarna och bloggens storlek.' },
   { name: 'sokdata', op: 'sokdata', shape: { dagar: z.number().int().min(7).max(90).optional() }, desc: 'Search Console-data med artikelmöjligheter (många visningar, svag position/CTR).' },
   { name: 'trafikdata', op: 'trafikdata', shape: { dagar: z.number().int().min(7).max(90).optional() }, desc: 'GA4-totaler och mest besökta sidorna från Google-sök.' },
