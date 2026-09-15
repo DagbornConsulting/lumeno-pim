@@ -242,6 +242,28 @@ export function buildOps(store) {
       return { angrad: true, handelse: ev.description, ...result };
     },
 
+    async butiksoversikt() {
+      const cnt = async (f) => { const { count } = await f(supabase.from('products').select('*', { count: 'exact', head: true }).eq('store_id', store.id)); return count || 0; };
+      const [aktiva, utkast, totalt] = await Promise.all([
+        cnt(q => q.eq('status', 'active').or('is_staged.is.null,is_staged.eq.false')),
+        cnt(q => q.eq('status', 'draft').or('is_staged.is.null,is_staged.eq.false')),
+        cnt(q => q),
+      ]);
+      const { count: varianter } = await supabase.from('variants').select('*', { count: 'exact', head: true });
+      const [rea, sales, bloggar] = await Promise.all([
+        priceHistory.saleReport(store.id).catch(() => ({ summary: {} })),
+        shopifySales.getSales(store, { days: 30 }).catch(() => null),
+        client.graphql('{ blogs(first: 5) { nodes { title articlesCount { count } } } }').catch(() => null),
+      ]);
+      return {
+        butik: store.name,
+        produkter: { totalt, aktiva, utkast, varianter: varianter || null },
+        rea: { antalPaRea: rea.summary?.onSale ?? 0, langstDagar: rea.summary?.longestDays ?? 0 },
+        forsaljning30dagar: sales ? { ordrar: sales.orders30, omsattning: sales.revenue30 + ' kr', saldaEnheter: sales.units30 } : null,
+        blogg: bloggar ? bloggar.blogs.nodes.map(b => ({ titel: b.title, artiklar: b.articlesCount?.count ?? null })) : null,
+      };
+    },
+
     async sokdata({ dagar } = {}) {
       const siteUrl = store.settings?.google?.gsc_site_url;
       if (!googleSeo.isConfigured() || !siteUrl) throw new Error('Search Console är inte kopplad i PIM ännu (SEO & Insikter).');
@@ -330,6 +352,7 @@ const TOOLS = [
   { name: 'produkt_sok', op: 'produktSok', shape: { sokord: z.string().min(2) }, desc: 'Sök produkter (namn/SKU) för att länka till dem i artiklar.' },
   { name: 'historik', op: 'historik', shape: { antal: z.number().int().min(1).max(50).optional() }, desc: 'Visa senaste ändringarna gjorda via assistenten, med händelse-id för angra.' },
   { name: 'angra', op: 'angra', shape: { handelse_id: z.string() }, desc: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs, guideregler läggs tillbaka/tas bort.' },
+  { name: 'butiksoversikt', op: 'butiksoversikt', shape: {}, desc: 'Snabb överblick av butiken: antal produkter (totalt/aktiva/utkast), varianter, produkter på rea, försäljning senaste 30 dagarna och bloggens storlek.' },
   { name: 'sokdata', op: 'sokdata', shape: { dagar: z.number().int().min(7).max(90).optional() }, desc: 'Search Console-data med artikelmöjligheter (många visningar, svag position/CTR).' },
   { name: 'trafikdata', op: 'trafikdata', shape: { dagar: z.number().int().min(7).max(90).optional() }, desc: 'GA4-totaler och mest besökta sidorna från Google-sök.' },
   { name: 'toppsaljare', op: 'toppsaljare', shape: { dagar: z.number().int().min(7).max(365).optional() }, desc: 'Bäst säljande produkter med butiks-URL:er för perioden.' },

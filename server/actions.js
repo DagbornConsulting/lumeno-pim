@@ -45,6 +45,7 @@ const OPENAPI = {
     '/actions/produkter': { get: { operationId: 'produktSok', 'x-openai-isConsequential': false, summary: 'Sök produkter (namn/SKU) för att länka till dem i texter. Använd ALLTID dessa URL:er, hitta aldrig på länkar.', parameters: [{ ...q('sokord', 'Del av produktnamn eller SKU'), required: true }], responses: RESP } },
     '/actions/historik': { get: { operationId: 'historik', 'x-openai-isConsequential': false, summary: 'Senaste ändringarna gjorda via assistenten, med händelse-id för ångra.', parameters: [q('antal', 'Max antal, standard 10', 'integer')], responses: RESP } },
     '/actions/angra': { post: { operationId: 'angra', 'x-openai-isConsequential': true, summary: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs till före-läget, guideregler läggs tillbaka/tas bort.', requestBody: { required: true, content: { 'application/json': { schema: P({ handelse_id: S.str }, ['handelse_id']) } } }, responses: RESP } },
+    '/actions/oversikt': { get: { operationId: 'butiksoversikt', 'x-openai-isConsequential': false, summary: 'Snabb överblick: antal produkter (totalt/aktiva/utkast), varianter, antal på rea, försäljning 30 dagar och bloggens storlek.', responses: RESP } },
     '/actions/sokdata': { get: { operationId: 'sokdata', 'x-openai-isConsequential': false, summary: 'Google Search Console: toppsökfrågor + artikelmöjligheter (många visningar, svag position/CTR).', parameters: [q('dagar', 'Period bakåt 7–90, standard 28', 'integer')], responses: RESP } },
     '/actions/trafik': { get: { operationId: 'trafikdata', 'x-openai-isConsequential': false, summary: 'GA4-totaler (sessioner, köp, intäkt) och mest besökta sidorna från Google-sök.', parameters: [q('dagar', 'Period bakåt 7–90, standard 28', 'integer')], responses: RESP } },
     '/actions/toppsaljare': { get: { operationId: 'toppsaljare', 'x-openai-isConsequential': false, summary: 'Bäst säljande produkter med butiks-URL:er för perioden.', parameters: [q('dagar', 'Period bakåt 7–365, standard 30', 'integer')], responses: RESP } },
@@ -84,6 +85,7 @@ router.post('/artikel-uppdatera', run('artikelUppdatera', r => r.body || {}));
 router.get('/produkter', run('produktSok', r => ({ sokord: r.query.sokord })));
 router.get('/historik', run('historik', r => ({ antal: r.query.antal })));
 router.post('/angra', run('angra', r => r.body || {}));
+router.get('/oversikt', run('butiksoversikt'));
 router.get('/sokdata', run('sokdata', r => ({ dagar: r.query.dagar })));
 router.get('/trafik', run('trafikdata', r => ({ dagar: r.query.dagar })));
 router.get('/toppsaljare', run('toppsaljare', r => ({ dagar: r.query.dagar })));
