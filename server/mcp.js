@@ -149,7 +149,7 @@ export function buildOps(store) {
       return { id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', taggar: a.tags, sammanfattning: a.summary, forfattare: a.author?.name, seo_titel: a.seoT?.value ?? null, seo_beskrivning: a.seoD?.value ?? null, html: a.body };
     },
 
-    async artikelSkapa({ titel, html, sammanfattning, taggar, blogg_id, publicera, forfattare, seo_titel, seo_beskrivning }) {
+    async artikelSkapa({ titel, html, sammanfattning, taggar, blogg_id, publicera, forfattare, seo_titel, seo_beskrivning, plan_nr }) {
       if (!titel || String(titel).length < 5) throw new Error('Titel saknas eller är för kort');
       if (!html || String(html).length < 200) throw new Error('HTML-brödtexten är för kort (minst 200 tecken)');
       const blogGid = gid(blogg_id || await forstaBloggId(), 'Blog');
@@ -161,8 +161,13 @@ export function buildOps(store) {
       const a = m.articleCreate.article;
       await sattArtikelSeo(numId(a.id), { titel: seo_titel || titel, beskrivning: seo_beskrivning || sammanfattning });
       const handelseId = await logga('blog_article_created', `Blogginlägg ${publicera ? 'publicerat' : 'skapat som utkast'} via assistent: "${a.title}"`, { articleId: numId(a.id), published: !!publicera });
+      let planMarkering;
+      if (plan_nr != null) {
+        try { planMarkering = await this.artikelplanMarkera({ nr: plan_nr, status: 'klar', artikel_id: numId(a.id) }); }
+        catch (e) { planMarkering = { fel: e.message }; }
+      }
       return {
-        skapad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', handelse_id: handelseId,
+        skapad: true, id: numId(a.id), titel: a.title, status: a.isPublished ? 'publicerad' : 'utkast', handelse_id: handelseId, ...(planMarkering ? { artikelplan: planMarkering } : {}),
         seo: { titel: (seo_titel || titel || '').slice(0, 70), beskrivning: (seo_beskrivning || sammanfattning || '') ? (seo_beskrivning || sammanfattning).slice(0, 160) : '(saknas — sätt seo_beskrivning!)' },
         adminUrl: adminUrl(store, `/content/articles/${numId(a.id)}`),
         webbUrl: a.isPublished ? publicUrl(store, `/blogs/${a.blog.handle}/${a.handle}`) : null,
@@ -277,6 +282,24 @@ export function buildOps(store) {
       return { angrad: true, handelse: ev.description, ...result };
     },
 
+    async artikelplanMarkera({ nr, status, artikel_id }) {
+      const plan = store.settings?.article_plan;
+      if (!plan?.artiklar?.length) throw new Error('Ingen artikelplan finns');
+      const item = plan.artiklar.find(a => Number(a.nr) === Number(nr));
+      if (!item) throw new Error(`Ingen planartikel med nr ${nr}`);
+      const ny = (status || 'klar').toLowerCase();
+      if (!['klar', 'planerad'].includes(ny)) throw new Error('status måste vara klar eller planerad');
+      item.status = ny;
+      if (ny === 'klar') { item.klar_datum = new Date().toISOString().slice(0, 10); if (artikel_id) item.artikel_id = String(artikel_id); }
+      else { delete item.klar_datum; delete item.artikel_id; }
+      const settings = { ...(store.settings || {}), article_plan: plan };
+      const { error } = await supabase.from('stores').update({ settings }).eq('id', store.id);
+      if (error) throw new Error(error.message);
+      store.settings = settings;
+      await logga('article_plan_marked', `Artikelplan: nr ${nr} "${item.artikel}" markerad ${ny}`, { nr, status: ny, artikel_id: artikel_id || null });
+      return { nr: item.nr, artikel: item.artikel, status: item.status, klar_datum: item.klar_datum || null };
+    },
+
     async produktLas({ sku }) {
       if (!sku) throw new Error('Ange SKU');
       const { data: p } = await supabase.from('products').select('id, sku, title, handle, status, shopify_product_id').eq('store_id', store.id).eq('sku', String(sku).trim()).maybeSingle();
@@ -326,18 +349,19 @@ export function buildOps(store) {
       return { uppdaterad: true, sku: String(sku).trim(), titel: titel ?? before.titel, handelse_id: handelseId, adminUrl: adminUrl(store, `/products/${before.shopify_produkt_id}`), url: before.url };
     },
 
-    async artikelplan({ manad, prio, pelare } = {}) {
+    async artikelplan({ manad, prio, pelare, status } = {}) {
       const plan = store.settings?.article_plan;
       if (!plan?.artiklar?.length) throw new Error('Ingen artikelplan är importerad i PIM.');
       let items = plan.artiklar;
       if (manad) items = items.filter(a => a.publiceras.includes(String(manad)));
       if (prio) items = items.filter(a => a.prio.toUpperCase() === String(prio).toUpperCase());
       if (pelare) items = items.filter(a => a.pelare.toLowerCase().includes(String(pelare).toLowerCase()));
+      if (status) items = items.filter(a => (a.status || 'planerad') === String(status).toLowerCase());
       return {
         beskrivning: plan.beskrivning, kalla: plan.kalla,
         pelare: plan.pelare,
         artiklar: items,
-        anvandning: 'Detta är den strategiska redaktionella kalendern. När du skriver en artikel från planen: använd målsökordet i titel och första stycket, följ AEO-vinkeln, internlänka till angivna collections/produkttyper (verifiera URL:er med produkt_sok), och stäm av mot blogg_lista så artikeln inte redan är skriven.',
+        anvandning: 'Detta är den strategiska redaktionella kalendern. Artiklar med status "klar" är redan skrivna — skriv inte om dem. När du skapat en artikel från planen: ange plan_nr i artikel_skapa så markeras den klar automatiskt, eller använd artikelplan_markera. När du skriver en artikel från planen: använd målsökordet i titel och första stycket, följ AEO-vinkeln, internlänka till angivna collections/produkttyper (verifiera URL:er med produkt_sok), och stäm av mot blogg_lista så artikeln inte redan är skriven.',
       };
     },
 
@@ -446,12 +470,13 @@ const TOOLS = [
   { name: 'ta_bort_lardom', op: 'taBortLardom', shape: { regel_id: z.string() }, desc: 'Ta bort en regel ur skrivguiden (id från skrivguide-verktyget).' },
   { name: 'blogg_lista', op: 'bloggLista', shape: { blogg_id: z.string().optional() }, desc: 'Lista bloggens artiklar — undvik dubbletter, hitta internlänkar och artikel-id för redigering.' },
   { name: 'artikel_las', op: 'artikelLas', shape: { artikel_id: z.string() }, desc: 'Hämta en artikels fulla innehåll (HTML) inför redigering.' },
-  { name: 'artikel_skapa', op: 'artikelSkapa', shape: { titel: z.string().min(5).max(255), html: z.string().min(200), seo_titel: z.string().max(70).optional().describe('SEO-titel, max 60 tecken, huvudsökordet tidigt'), seo_beskrivning: z.string().max(320).optional().describe('Meta-beskrivning, max 155 tecken'), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), blogg_id: z.string().optional(), publicera: z.boolean().optional(), forfattare: z.string().optional().describe('Författarnamn, standard Martina Dagborn') }, desc: 'Skapa ett nytt blogginlägg i Shopify. UTKAST om inte publicera=true uttryckligen begärts. Sätt ALLTID seo_titel och seo_beskrivning. Följ skrivguiden. Svara med admin-länken.' },
+  { name: 'artikel_skapa', op: 'artikelSkapa', shape: { titel: z.string().min(5).max(255), html: z.string().min(200), seo_titel: z.string().max(70).optional().describe('SEO-titel, max 60 tecken, huvudsökordet tidigt'), seo_beskrivning: z.string().max(320).optional().describe('Meta-beskrivning, max 155 tecken'), plan_nr: z.number().int().optional().describe('Nr i artikelplanen — markerar planposten som klar automatiskt'), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), blogg_id: z.string().optional(), publicera: z.boolean().optional(), forfattare: z.string().optional().describe('Författarnamn, standard Martina Dagborn') }, desc: 'Skapa ett nytt blogginlägg i Shopify. UTKAST om inte publicera=true uttryckligen begärts. Sätt ALLTID seo_titel och seo_beskrivning. Följ skrivguiden. Svara med admin-länken.' },
   { name: 'artikel_uppdatera', op: 'artikelUppdatera', shape: { artikel_id: z.string(), titel: z.string().min(5).max(255).optional(), html: z.string().min(50).optional(), seo_titel: z.string().max(70).optional(), seo_beskrivning: z.string().max(320).optional(), sammanfattning: z.string().max(500).optional(), taggar: z.array(z.string()).max(10).optional(), publicera: z.boolean().optional() }, desc: 'Uppdatera ett blogginlägg (inkl. SEO-titel/-beskrivning) och/eller publicera/avpublicera. Läs artikeln först så inget tappas.' },
   { name: 'produkt_sok', op: 'produktSok', shape: { sokord: z.string().min(2) }, desc: 'Sök produkter (namn/SKU) för att länka till dem i artiklar.' },
   { name: 'historik', op: 'historik', shape: { antal: z.number().int().min(1).max(50).optional() }, desc: 'Visa senaste ändringarna gjorda via assistenten, med händelse-id för angra.' },
   { name: 'angra', op: 'angra', shape: { handelse_id: z.string() }, desc: 'Ångra en tidigare ändring: skapad artikel raderas, uppdaterad återställs, guideregler läggs tillbaka/tas bort.' },
-  { name: 'artikelplan', op: 'artikelplan', shape: { manad: z.string().optional().describe('Filtrera på månad, t.ex. 2026-10'), prio: z.string().optional().describe('P1/P2/P3'), pelare: z.string().optional() }, desc: 'Butikens strategiska artikelplan (12-månaderskalender med målsökord, sökvolymer, internlänkningsplan och AEO-vinkel per artikel). Använd som förstahandskälla när användaren vill veta vad som ska skrivas härnäst.' },
+  { name: 'artikelplan', op: 'artikelplan', shape: { manad: z.string().optional().describe('Filtrera på månad, t.ex. 2026-10'), prio: z.string().optional().describe('P1/P2/P3'), pelare: z.string().optional(), status: z.string().optional().describe('planerad eller klar') }, desc: 'Butikens strategiska artikelplan (12-månaderskalender med målsökord, sökvolymer, internlänkningsplan och AEO-vinkel per artikel). Använd som förstahandskälla när användaren vill veta vad som ska skrivas härnäst.' },
+  { name: 'artikelplan_markera', op: 'artikelplanMarkera', shape: { nr: z.number().int().describe('Planartikelns nr'), status: z.string().optional().describe('klar (standard) eller planerad'), artikel_id: z.string().optional().describe('Shopify-artikelns id') }, desc: 'Markera en artikel i artikelplanen som klar (eller tillbaka till planerad). Görs automatiskt om plan_nr anges vid artikel_skapa.' },
   { name: 'produkt_las', op: 'produktLas', shape: { sku: z.string().min(2).describe('Produktens SKU (artikelnummer)') }, desc: 'Hämta en produkts fulla text: titel, beskrivning (HTML), SEO-titel/-beskrivning, taggar och URL. Läs ALLTID innan du skriver om en produkttext.' },
   { name: 'produkt_uppdatera_text', op: 'produktUppdateraText', shape: { sku: z.string().min(2), titel: z.string().min(3).max(255).optional(), beskrivning_html: z.string().min(50).optional().describe('Ny produktbeskrivning som HTML (p/ul/strong, inga rubriker h1-h2)'), seo_titel: z.string().max(70).optional(), seo_beskrivning: z.string().max(320).optional() }, desc: 'Uppdatera en produkts titel, beskrivning och/eller SEO-fält i Shopify (speglas till PIM). Läs produkten först. Ändra ALDRIG priser — det går inte härifrån. Fakta måste komma från befintlig produktdata.' },
   { name: 'butiksoversikt', op: 'butiksoversikt', shape: {}, desc: 'Snabb överblick av butiken: antal produkter (totalt/aktiva/utkast), varianter, produkter på rea, försäljning senaste 30 dagarna och bloggens storlek.' },
