@@ -308,12 +308,12 @@ function SupplierCard({ onOpenProduct }) {
   const [rowConfirm, setRowConfirm] = useState(null);
   const [rowBusy, setRowBusy] = useState(null);
 
-  const applyRow = async (r) => {
+  const applyRow = async (r, payload) => {
     setRowBusy(r.sku); setMsg(null);
     try {
       const resp = await fetch(`${API_URL}/supplier/apply-row`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sku: r.sku, price: r.suggestedPrice, costUnit: r.newCost, pack: r.pack }),
+        body: JSON.stringify({ sku: r.sku, ...payload }),
       });
       const d = await resp.json();
       if (!resp.ok) throw new Error(d.error || 'Uppdatering misslyckades');
@@ -339,6 +339,7 @@ function SupplierCard({ onOpenProduct }) {
 
   const TABS = [
     { key: 'priceChanged', label: 'Inköpspris ändrat', tone: '#c98a16' },
+    { key: 'packChanged', label: 'Förp.antal ändrat', tone: '#b83a3a' },
     { key: 'outOfStock', label: 'Slut hos Affari', tone: '#b83a3a' },
     { key: 'notDropship', label: 'Ej dropship-godkänd', tone: '#b83a3a' },
     { key: 'notInSupplier', label: 'Finns ej i filen', tone: '#9a9895' },
@@ -377,13 +378,30 @@ function SupplierCard({ onOpenProduct }) {
                       <span onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                         {rowConfirm === r.sku ? (
                           <>
-                            <button className="btn btn-primary btn-sm" disabled={rowBusy === r.sku} onClick={() => applyRow(r)}>
+                            <button className="btn btn-primary btn-sm" disabled={rowBusy === r.sku} onClick={() => applyRow(r, { price: r.suggestedPrice, costUnit: r.newCost, pack: r.pack })}>
                               {rowBusy === r.sku ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />} Sätt {kr(r.suggestedPrice)}
                             </button>{' '}
                             <button className="btn btn-secondary btn-sm" disabled={rowBusy === r.sku} onClick={() => setRowConfirm(null)}>Avbryt</button>
                           </>
                         ) : (
                           <button className="btn btn-secondary btn-sm" title={`Sätter pris ${r.suggestedPrice} kr och inköp ${r.newCost} kr i Shopify + PIM`} onClick={() => setRowConfirm(r.sku)}>Uppdatera i Shopify</button>
+                        )}
+                      </span>
+                    </>
+                  )}
+                  {tab === 'packChanged' && (
+                    <>
+                      <span className="num"><b style={{ color: '#b83a3a' }}>{r.oldPack > 1 ? `${r.oldPack}-pack` : '1 st'} → {r.newPack > 1 ? `${r.newPack}-pack` : '1 st'}</b><br /><span className="sub">à {kr(r.supplierPrice)} · pris {kr(r.currentPrice)} → bör {kr(r.suggestedPrice)}</span></span>
+                      <span onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                        {rowConfirm === r.sku ? (
+                          <>
+                            <button className="btn btn-primary btn-sm" disabled={rowBusy === r.sku} onClick={() => applyRow(r, { price: r.suggestedPrice, costUnit: r.supplierPrice, pack: r.newPack })}>
+                              {rowBusy === r.sku ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />} Sätt {kr(r.suggestedPrice)} ({r.newPack}-pack)
+                            </button>{' '}
+                            <button className="btn btn-secondary btn-sm" disabled={rowBusy === r.sku} onClick={() => setRowConfirm(null)}>Avbryt</button>
+                          </>
+                        ) : (
+                          <button className="btn btn-secondary btn-sm" title={`Sätter pris ${r.suggestedPrice} kr (${r.supplierPrice} × ${r.newPack} × 2,5), inköp ${r.suggestedCost} kr och förpackningsantal ${r.newPack} i Shopify + PIM. Kom ihåg att även uppdatera produktens titel/beskrivning med "${r.newPack}-pack".`} onClick={() => setRowConfirm(r.sku)}>Uppdatera i Shopify</button>
                         )}
                       </span>
                     </>

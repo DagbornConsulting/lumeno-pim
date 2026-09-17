@@ -3948,9 +3948,10 @@ app.post('/api/supplier/apply-row', async (req, res) => {
     }
 
     // Mirror to PIM (cost is stored per unit in PIM, per sold article in Shopify).
-    const vPatch = { ...(price != null ? { price } : {}), ...(costUnit != null ? { cost: costUnit } : {}) };
+    // pack_qty follows the supplier file — persist it so pricing/price-watch use the new pack.
+    const vPatch = { ...(price != null ? { price } : {}), ...(costUnit != null ? { cost: costUnit } : {}), ...(req.body?.pack != null ? { pack_qty: pack } : {}) };
     await supabase.from('variants').update(vPatch).eq('sku', sku);
-    const pPatch = { ...(price != null ? { default_price: price } : {}), ...(costUnit != null ? { default_cost: costUnit } : {}) };
+    const pPatch = { ...(price != null ? { default_price: price } : {}), ...(costUnit != null ? { default_cost: costUnit } : {}), ...(req.body?.pack != null ? { pack_qty: pack } : {}) };
     await supabase.from('products').update(pPatch).eq('store_id', store.id).eq('sku', sku);
 
     // Refresh price-watch rows: new price/status and (with new cost) new floor.

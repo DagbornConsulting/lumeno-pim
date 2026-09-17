@@ -66,6 +66,12 @@ export async function importSupplierFile({ storeId, rows, filename = '' }) {
     if (K.ean) row.ean = String(r[K.ean] || '').trim().slice(0, 32) || null;
     if (K.price) row.supplier_price = num(r[K.price]);
     if (K.pack) { const p = Math.round(num(r[K.pack]) || 0); row.pack_qty = p >= 1 ? p : null; }
+    else if (type === 'dropship' && row.name) {
+      // Dagliga CSV:n saknar pack-kolumn, men Affari skriver "N-pack" i namnet.
+      // Sätt bara när namnet säger något — annars behålls senaste kända värde.
+      const m = row.name.match(/(\d+)\s*-\s*pack/i);
+      if (m) row.pack_qty = Math.max(1, parseInt(m[1], 10));
+    }
     if (K.stock) row.stock = Math.round(num(r[K.stock]) ?? 0);
     if (K.inStock) row.in_stock = yes(r[K.inStock]);
     if (K.dropship) row.dropship_ok = yes(r[K.dropship]);
@@ -115,7 +121,7 @@ export async function supplierReport(storeId, cap = 15) {
   }
 
   const bySku = new Map(stock.map(s => [s.sku, s]));
-  const outOfStock = [], notDropship = [], priceChanged = [], notInSupplier = [];
+  const outOfStock = [], notDropship = [], priceChanged = [], packChanged = [], notInSupplier = [];
   let lastImport = null;
   for (const s of stock) if (s.imported_at && (!lastImport || s.imported_at > lastImport)) lastImport = s.imported_at;
 
@@ -127,6 +133,16 @@ export async function supplierReport(storeId, cap = 15) {
       outOfStock.push({ ...base, stock: s.stock, deliveryWeek: s.delivery_week });
     }
     if (s.dropship_ok === false) notDropship.push(base);
+    // Förpackningsantal: Affaris fil (Excel-kolumn eller "N-pack" i namnet) vs PIM.
+    if (s.pack_qty != null && Number(s.pack_qty) >= 1 && Number(s.pack_qty) !== Number(l.pack)) {
+      packChanged.push({
+        ...base, oldPack: Number(l.pack), newPack: Number(s.pack_qty),
+        supplierPrice: s.supplier_price != null ? Number(s.supplier_price) : Number(l.cost),
+        currentPrice: l.product.default_price,
+        suggestedPrice: roundUp9(Number(s.supplier_price ?? l.cost) * Number(s.pack_qty) * 2.5),
+        suggestedCost: Math.round(Number(s.supplier_price ?? l.cost) * Number(s.pack_qty) * 100) / 100,
+      });
+    }
     if (s.supplier_price != null && l.cost != null && Math.abs(Number(s.supplier_price) - Number(l.cost)) > 0.5) {
       priceChanged.push({
         ...base, oldCost: Number(l.cost), newCost: Number(s.supplier_price),
@@ -142,10 +158,11 @@ export async function supplierReport(storeId, cap = 15) {
     lastImport,
     snapshotSkus: stock.length,
     liveSkus: live.size,
-    counts: { outOfStock: outOfStock.length, notDropship: notDropship.length, priceChanged: priceChanged.length, notInSupplier: notInSupplier.length },
+    counts: { outOfStock: outOfStock.length, notDropship: notDropship.length, priceChanged: priceChanged.length, packChanged: packChanged.length, notInSupplier: notInSupplier.length },
     outOfStock: outOfStock.slice(0, cap),
     notDropship: notDropship.slice(0, cap),
     priceChanged: priceChanged.slice(0, cap),
+    packChanged: packChanged.slice(0, cap),
     notInSupplier: notInSupplier.slice(0, cap),
     migrationMissing: false,
   };
