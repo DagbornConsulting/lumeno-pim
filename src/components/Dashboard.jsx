@@ -342,6 +342,7 @@ function SupplierCard({ onOpenProduct }) {
     { key: 'packChanged', label: 'Förp.antal ändrat', tone: '#b83a3a' },
     { key: 'outOfStock', label: 'Slut hos Affari', tone: '#b83a3a' },
     { key: 'notDropship', label: 'Ej dropship-godkänd', tone: '#b83a3a' },
+    { key: 'newInSupplier', label: 'Nya hos Affari', tone: '#2f8f55' },
     { key: 'notInSupplier', label: 'Finns ej i filen', tone: '#9a9895' },
   ];
   const list = data?.[tab] || [];
@@ -356,7 +357,7 @@ function SupplierCard({ onOpenProduct }) {
       {loading && !data ? <Spinner /> : error ? <Err text={error} /> : data?.migrationMissing ? (
         <Err text="Kör database/add-dashboard.sql i Supabase för att aktivera leverantörsfilen." />
       ) : data && !data.lastImport ? (
-        <div className="dash-empty">Ingen leverantörsfil inläst ännu. Ladda upp Affaris dagliga <em>Dropship.csv</em> (lager + pris) eller <em>ExcelExportGeneral</em> (förpackningsantal).</div>
+        <div className="dash-empty">Ingen leverantörsfil inläst ännu. Ladda upp Affaris dagliga <em>Dropship.csv</em> (lager + pris) eller den fullständiga <em>ExcelExportGeneral</em> en gång i veckan (förpackningsantal + nya produkter).</div>
       ) : data && (
         <>
           <div className="dash-stats">
@@ -407,6 +408,10 @@ function SupplierCard({ onOpenProduct }) {
                     </>
                   )}
                   {tab === 'outOfStock' && <span className="num" style={{ color: '#b83a3a' }}>lager {r.stock ?? 0}</span>}
+                  {tab === 'newInSupplier' && (
+                    <span className="num">à {kr(r.supplierPrice)}{r.pack > 1 ? ` × ${r.pack}` : ''} · lager {r.stock ?? '–'}<br />
+                      <span className="sub">{r.suggestedPrice != null ? `förslag ${kr(r.suggestedPrice)}` : 'pris saknas i filen'}</span></span>
+                  )}
                 </li>
               ))}
             </ul>

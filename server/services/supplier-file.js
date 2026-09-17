@@ -155,8 +155,28 @@ export async function supplierReport(storeId, cap = 15) {
     if (!live.has(sku)) live.set(sku, { product: p, cost: v.cost ?? p.default_cost, pack: v.pack_qty || p.pack_qty || 1, sku });
   }
 
+  // ALL skus PIM knows about (även utkast/staged) — allt annat i filen är "nytt hos Affari".
+  const pimSkus = new Set();
+  for (const p of products) if (p.sku) pimSkus.add(String(p.sku).trim());
+  for (const v of variants) if (v.sku) pimSkus.add(String(v.sku).trim());
+
   const bySku = new Map(stock.map(s => [s.sku, s]));
   const outOfStock = [], notDropship = [], priceChanged = [], packChanged = [], notInSupplier = [];
+  const newInSupplier = [];
+  for (const s of stock) {
+    if (pimSkus.has(s.sku)) continue;
+    // Bara dropship-godkända (Excel-filen saknar flaggan → pack-kolumnen får duga som signal).
+    if (!(s.dropship_ok === true || (s.dropship_ok == null && s.pack_qty != null))) continue;
+    const unit = Number(s.supplier_price);
+    const packN = s.pack_qty || 1;
+    newInSupplier.push({
+      sku: s.sku, title: s.name || s.sku, pack: packN,
+      supplierPrice: Number.isFinite(unit) ? unit : null,
+      stock: s.stock, inStock: s.in_stock, deliveryWeek: s.delivery_week,
+      suggestedPrice: Number.isFinite(unit) ? roundUp9(unit * packN * 2.5) : null,
+    });
+  }
+  newInSupplier.sort((a, b) => (b.stock ?? 0) - (a.stock ?? 0));
   let lastImport = null;
   for (const s of stock) if (s.imported_at && (!lastImport || s.imported_at > lastImport)) lastImport = s.imported_at;
 
@@ -216,12 +236,13 @@ export async function supplierReport(storeId, cap = 15) {
     lastImport,
     snapshotSkus: stock.length,
     liveSkus: live.size,
-    counts: { outOfStock: outOfStock.length, notDropship: notDropship.length, priceChanged: priceChanged.length, packChanged: packChanged.length, notInSupplier: notInSupplier.length },
+    counts: { outOfStock: outOfStock.length, notDropship: notDropship.length, priceChanged: priceChanged.length, packChanged: packChanged.length, notInSupplier: notInSupplier.length, newInSupplier: newInSupplier.length },
     outOfStock: outOfStock.slice(0, cap),
     notDropship: notDropship.slice(0, cap),
     priceChanged: priceChanged.slice(0, cap),
     packChanged: packChanged.slice(0, cap),
     notInSupplier: notInSupplier.slice(0, cap),
+    newInSupplier: newInSupplier.slice(0, cap),
     migrationMissing: false,
   };
 }
