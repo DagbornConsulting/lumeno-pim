@@ -66,12 +66,6 @@ export async function importSupplierFile({ storeId, rows, filename = '' }) {
     if (K.ean) row.ean = String(r[K.ean] || '').trim().slice(0, 32) || null;
     if (K.price) row.supplier_price = num(r[K.price]);
     if (K.pack) { const p = Math.round(num(r[K.pack]) || 0); row.pack_qty = p >= 1 ? p : null; }
-    else if (type === 'dropship' && row.name) {
-      // Dagliga CSV:n saknar pack-kolumn, men Affari skriver "N-pack" i namnet.
-      // Sätt bara när namnet säger något — annars behålls senaste kända värde.
-      const m = row.name.match(/(\d+)\s*-\s*pack/i);
-      if (m) row.pack_qty = Math.max(1, parseInt(m[1], 10));
-    }
     if (K.stock) row.stock = Math.round(num(r[K.stock]) ?? 0);
     if (K.inStock) row.in_stock = yes(r[K.inStock]);
     if (K.dropship) row.dropship_ok = yes(r[K.dropship]);
@@ -81,6 +75,30 @@ export async function importSupplierFile({ storeId, rows, filename = '' }) {
   }
   const upserts = [...seen.values()];
   if (!upserts.length) throw new Error('Inga rader med artikelnummer');
+  let packEvents = 0;
+
+  // Upptäck att Affari ÄNDRAT förpackningen: "N-pack" i namnet som tillkommit
+  // eller bytt tal sedan förra filen. (Namn som alltid haft "50-pack" är själva
+  // artikeln och larmar inte.) Loggas som händelse och visas i Affari-kortet.
+  const packMarker = (name) => { const m = String(name || '').match(/(\d+)\s*-\s*pack/i); return m ? Math.max(1, parseInt(m[1], 10)) : null; };
+  if (type === 'dropship') {
+    try {
+      const prev = await fetchAll('supplier_stock', 'sku, name, supplier_price', q => q.eq('store_id', storeId));
+      const prevBySku = new Map(prev.map(r => [r.sku, r]));
+      for (const row of upserts) {
+        const old = prevBySku.get(row.sku);
+        if (!old || !old.name || !row.name) continue;
+        const oldM = packMarker(old.name), newM = packMarker(row.name);
+        if (oldM === newM) continue;
+        packEvents++;
+        await supabase.from('activity_log').insert({
+          store_id: storeId, action: 'supplier_pack_change', entity_type: 'store', entity_id: storeId,
+          description: `Affari ändrade förpackning för ${row.sku}: "${old.name}" → "${row.name}"`,
+          changes: { sku: row.sku, oldName: old.name, newName: row.name, oldPackMarker: oldM, newPackMarker: newM, supplierPrice: row.supplier_price ?? old.supplier_price ?? null },
+        });
+      }
+    } catch (e) { console.warn('pack-change detection:', e.message); }
+  }
 
   for (let i = 0; i < upserts.length; i += 400) {
     const { error } = await supabase.from('supplier_stock').upsert(upserts.slice(i, i + 400), { onConflict: 'store_id,sku' });
@@ -89,10 +107,27 @@ export async function importSupplierFile({ storeId, rows, filename = '' }) {
 
   let pack = null;
   if (type === 'export') {
+    // Flagga pack-ändringar mot PIM innan importPackQty skriver över dem —
+    // annars uppdateras förpackningen tyst utan att priset följer med.
+    try {
+      const pimProds = await fetchAll('products', 'sku, pack_qty, default_cost', q => q.eq('store_id', storeId));
+      const pimBySku = new Map(pimProds.filter(x => x.sku).map(x => [String(x.sku).trim(), x]));
+      for (const row of upserts) {
+        if (row.pack_qty == null) continue;
+        const pim = pimBySku.get(row.sku);
+        if (!pim || Number(pim.pack_qty || 1) === Number(row.pack_qty)) continue;
+        packEvents++;
+        await supabase.from('activity_log').insert({
+          store_id: storeId, action: 'supplier_pack_change', entity_type: 'store', entity_id: storeId,
+          description: `Affari ändrade förpackningsantal för ${row.sku}: ${pim.pack_qty || 1} → ${row.pack_qty} (${row.name || ''})`,
+          changes: { sku: row.sku, oldPackMarker: Number(pim.pack_qty || 1), newPackMarker: Number(row.pack_qty), supplierPrice: row.supplier_price ?? pim.default_cost ?? null, kalla: 'excel' },
+        });
+      }
+    } catch (e) { console.warn('pack-diff (excel):', e.message); }
     try { pack = await importPackQty({ storeId, rows }); } catch (e) { pack = { error: e.message }; }
   }
   const report = await supplierReport(storeId);
-  return { type, rows: rows.length, imported: upserts.length, pack, report: { counts: report.counts, lastImport: report.lastImport } };
+  return { type, rows: rows.length, imported: upserts.length, pack, packEvents, report: { counts: report.counts, lastImport: report.lastImport } };
 }
 
 // What the latest supplier snapshot says about our live catalogue.
@@ -133,16 +168,6 @@ export async function supplierReport(storeId, cap = 15) {
       outOfStock.push({ ...base, stock: s.stock, deliveryWeek: s.delivery_week });
     }
     if (s.dropship_ok === false) notDropship.push(base);
-    // Förpackningsantal: Affaris fil (Excel-kolumn eller "N-pack" i namnet) vs PIM.
-    if (s.pack_qty != null && Number(s.pack_qty) >= 1 && Number(s.pack_qty) !== Number(l.pack)) {
-      packChanged.push({
-        ...base, oldPack: Number(l.pack), newPack: Number(s.pack_qty),
-        supplierPrice: s.supplier_price != null ? Number(s.supplier_price) : Number(l.cost),
-        currentPrice: l.product.default_price,
-        suggestedPrice: roundUp9(Number(s.supplier_price ?? l.cost) * Number(s.pack_qty) * 2.5),
-        suggestedCost: Math.round(Number(s.supplier_price ?? l.cost) * Number(s.pack_qty) * 100) / 100,
-      });
-    }
     if (s.supplier_price != null && l.cost != null && Math.abs(Number(s.supplier_price) - Number(l.cost)) > 0.5) {
       priceChanged.push({
         ...base, oldCost: Number(l.cost), newCost: Number(s.supplier_price),
@@ -153,6 +178,39 @@ export async function supplierReport(storeId, cap = 15) {
     }
   }
   priceChanged.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+
+  // Pack-ändringar: loggade händelser (senaste 60 dagarna) där PIM ännu inte
+  // uppdaterats till den nya förpackningen — försvinner när "Uppdatera i
+  // Shopify" körts (den sätter PIM:s pack_qty).
+  try {
+    const since = new Date(Date.now() - 60 * 864e5).toISOString();
+    const { data: events } = await supabase.from('activity_log')
+      .select('id, changes, created_at')
+      .eq('store_id', storeId).eq('action', 'supplier_pack_change').gte('created_at', since)
+      .order('created_at', { ascending: false }).limit(200);
+    const seenSkus = new Set();
+    for (const ev of events || []) {
+      const c = ev.changes || {};
+      if (!c.sku || seenSkus.has(c.sku)) continue;
+      seenSkus.add(c.sku);
+      const l = live.get(c.sku);
+      if (!l) continue;
+      const newPack = c.newPackMarker ?? 1;
+      const unit = Number(c.supplierPrice ?? bySku.get(c.sku)?.supplier_price ?? l.cost);
+      const suggested = roundUp9(unit * newPack * 2.5);
+      const priceClose = l.product.default_price != null && Math.abs(Number(l.product.default_price) - suggested) <= Math.max(5, suggested * 0.02);
+      if (Number(l.pack) === Number(newPack) && priceClose) continue; // åtgärdad (pack + pris)
+      packChanged.push({
+        sku: c.sku, title: l.product.title, productId: l.product.id, pack: l.pack,
+        oldPack: Number(l.pack), newPack: Number(newPack),
+        oldName: c.oldName, newName: c.newName,
+        supplierPrice: unit, currentPrice: l.product.default_price,
+        suggestedPrice: suggested,
+        suggestedCost: Math.round(unit * newPack * 100) / 100,
+        upptackt: String(ev.created_at).slice(0, 10),
+      });
+    }
+  } catch (_) { /* activity_log saknas → inga pack-larm */ }
 
   return {
     lastImport,
