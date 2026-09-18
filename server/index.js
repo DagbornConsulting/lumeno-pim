@@ -21,6 +21,7 @@ import * as priceWatch from './services/price-watch.js';
 import * as shopifySales from './services/shopify-sales.js';
 import * as supplierFile from './services/supplier-file.js';
 import * as priceHistory from './services/price-history.js';
+import * as googleAds from './services/google-ads.js';
 
 // Heavy modules — loaded in the background so they don't block cold-start parsing
 let anthropic = null;
@@ -528,6 +529,7 @@ const publicExactPaths = new Set([
   '/api/auth/login',
   '/api/auth/verify',   // validates its own bearer token internally
   '/api/auth/logout',
+  '/api/google-ads/oauth/callback', // Google skickar webbläsaren hit — state-parametern validerar
   '/api/price-watch/cron', // Vercel Cron — authenticates with CRON_SECRET, not a session
   '/api/cron/shopify-pull', // Vercel Cron — same secret
 ]);
@@ -3858,6 +3860,98 @@ app.get('/api/dashboard/google', async (req, res) => {
     }
     _googleCache.set(key, { at: Date.now(), data: out });
     res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============================================
+// GOOGLE ADS (läsning + OAuth-koppling; inga skrivningar mot Ads)
+// ============================================
+const adsRedirectUri = (req) => {
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  return `${proto}://${host}/api/google-ads/oauth/callback`;
+};
+
+app.get('/api/google-ads/status', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    res.json({ configured: googleAds.isConfigured(), ...googleAds.getConnection(store) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Steg 1: ge front-end en consent-URL (state sparas på butiken).
+app.get('/api/google-ads/connect', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!googleAds.isConfigured()) return res.status(400).json({ error: 'Google Ads-nycklar saknas på servern (GOOGLE_ADS_DEVELOPER_TOKEN, GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET).' });
+    const state = crypto.randomBytes(16).toString('hex');
+    await googleAds.saveConnection(store.id, store.settings, { oauth_state: state, oauth_state_at: new Date().toISOString() });
+    res.json({ url: googleAds.oauthStartUrl({ redirectUri: adsRedirectUri(req), state }) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Steg 2: Google skickar tillbaka webbläsaren hit. Butiken hittas via state.
+app.get('/api/google-ads/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect('/?google-ads=nekad');
+    const { data: stores } = await supabase.from('stores').select('id, settings');
+    const store = (stores || []).find(s => s.settings?.google_ads?.oauth_state && s.settings.google_ads.oauth_state === state);
+    if (!store || !code) return res.status(400).send('Ogiltig eller utgången OAuth-state — börja om från "Koppla Google Ads" i Översikten.');
+    const tok = await googleAds.exchangeCode({ code, redirectUri: adsRedirectUri(req) });
+    if (!tok.refresh_token) return res.status(400).send('Google gav ingen refresh-token — försök igen (kopplingen kräver "consent"-steget).');
+    let candidates = [];
+    try { candidates = await googleAds.listAccessibleCustomers(tok.refresh_token); } catch (_) {}
+    const nonManager = candidates.filter(c => !c.manager);
+    const auto = nonManager.length === 1 ? nonManager[0].id : null;
+    let login_customer_id = null;
+    if (auto) { try { login_customer_id = (await googleAds.probeAccess(tok.refresh_token, auto)).loginCustomerId; } catch (_) {} }
+    await googleAds.saveConnection(store.id, store.settings, {
+      refresh_token: tok.refresh_token, candidates, customer_id: auto, login_customer_id,
+      connected_at: new Date().toISOString(), oauth_state: null,
+    });
+    try { await db.logActivity('google_ads_connected', 'store', store.id, `Google Ads kopplat${auto ? ` (konto ${auto})` : ' (välj konto i Översikten)'}`, { customer_id: auto }, store.id); } catch (_) {}
+    res.redirect('/?google-ads=kopplad');
+  } catch (e) { res.status(500).send(`Google Ads-kopplingen misslyckades: ${e.message}`); }
+});
+
+// Om flera konton är åtkomliga: välj vilket som är Lumenos.
+app.post('/api/google-ads/select-account', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const customerId = String(req.body?.customer_id || '').replace(/-/g, '');
+    if (!customerId) return res.status(400).json({ error: 'customer_id saknas' });
+    const g = store.settings?.google_ads || {};
+    if (!g.refresh_token) return res.status(400).json({ error: 'Ingen refresh-token — koppla Google Ads först.' });
+    const { loginCustomerId } = await googleAds.probeAccess(g.refresh_token, customerId);
+    const saved = await googleAds.saveConnection(store.id, store.settings, { customer_id: customerId, login_customer_id: loginCustomerId });
+    res.json({ ok: true, customer_id: saved.customer_id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Kortet på Översikten: kostnad/klick/konverteringar 28 dgr + varningar.
+const _adsCache = new Map();
+app.get('/api/dashboard/google-ads', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!googleAds.isConfigured()) return res.json({ notConfigured: 'keys' });
+    const conn = googleAds.getConnection(store);
+    if (!conn.connected) return res.json({ notConfigured: conn.hasRefreshToken ? 'account' : 'oauth', candidates: conn.candidates });
+    const hit = _adsCache.get(store.id);
+    if (req.query.refresh !== '1' && hit && Date.now() - hit.at < 30 * 60 * 1000) return res.json(hit.data);
+    const data = await googleAds.adsReport(store);
+    _adsCache.set(store.id, { at: Date.now(), data });
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Rå GAQL-läsning för analys (endast googleAds:search — kan inte ändra något).
+app.post('/api/google-ads/query', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    const gaql = String(req.body?.gaql || '').trim();
+    if (!/^select\s/i.test(gaql)) return res.status(400).json({ error: 'Endast GAQL SELECT-frågor.' });
+    res.json({ rows: await googleAds.search(store, gaql, { customerId: req.body?.customer_id }) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

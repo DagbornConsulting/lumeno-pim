@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard, Scale, TrendingDown, AlertTriangle, CheckCircle2, RefreshCw,
   ArrowRight, Package, PackagePlus, Link2, Activity, Search, FolderInput, Zap,
-  ShoppingBag, Globe, Upload, Truck, Loader2, Percent,
+  ShoppingBag, Globe, Upload, Truck, Loader2, Percent, Megaphone,
 } from 'lucide-react';
 import './Dashboard.css';
 import './PriceWatch.css';
@@ -231,6 +231,100 @@ function GoogleCard({ onNavigate }) {
             </div>
           ) : <span className="sub">GA4 ej kopplad</span>}
           <span className="sub" style={{ fontSize: 11 }}>Δ jämför med föregående 28 dagar; veckosiffrorna med veckan före. Håll muspekaren över kurvan för dagsvärden.</span>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// --- Google Ads -------------------------------------------------------------
+const CAMPAIGN_STATUS_TONE = { ELIGIBLE: '#2f8f55', LEARNING: '#2f8f55', PAUSED: '#9a9895', PENDING: '#c98a16' };
+function GoogleAdsCard() {
+  const [{ loading, data, error }, reload] = useLazy('/dashboard/google-ads');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const connect = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`${API_URL}/google-ads/connect`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Kunde inte starta kopplingen');
+      window.location.href = d.url; // Google-consent → tillbaka till Översikten
+    } catch (e) { setMsg(`Fel: ${e.message}`); setBusy(false); }
+  };
+
+  const pickAccount = async (id) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`${API_URL}/google-ads/select-account`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: id }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Kunde inte välja konto');
+      await reload(true);
+    } catch (e) { setMsg(`Fel: ${e.message}`); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Card title="Google Ads, 28 dagar" icon={Megaphone} span={6}
+      right={<button className="dash-link" onClick={() => reload(true)} title="Hämta igen"><RefreshCw size={12} className={loading ? 'spin' : ''} /></button>}>
+      {msg && <div className="dash-tile-sub" style={{ marginBottom: 8, color: '#b83a3a' }}>{msg}</div>}
+      {loading && !data ? <Spinner /> : error ? <Err text={error} /> : data?.notConfigured === 'keys' ? (
+        <div className="dash-empty"><AlertTriangle size={14} color="#c98a16" /> Google Ads-nycklar saknas på servern (GOOGLE_ADS_DEVELOPER_TOKEN, GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET i Vercel).</div>
+      ) : data?.notConfigured === 'oauth' ? (
+        <div className="dash-empty" style={{ flexDirection: 'column', gap: 10 }}>
+          <span>Google Ads är inte kopplat ännu.</span>
+          <button className="btn btn-primary btn-sm" disabled={busy} onClick={connect}>
+            {busy ? <Loader2 size={13} className="spin" /> : <Link2 size={13} />} Koppla Google Ads
+          </button>
+        </div>
+      ) : data?.notConfigured === 'account' ? (
+        <div>
+          <div className="dash-tile-sub" style={{ marginBottom: 8 }}>Vilket konto är Lumenos?</div>
+          {(data.candidates || []).filter(c => !c.manager).map(c => (
+            <button key={c.id} className="btn btn-secondary btn-sm" style={{ marginRight: 6, marginBottom: 6 }} disabled={busy} onClick={() => pickAccount(c.id)}>
+              {c.name || c.id} ({c.id})
+            </button>
+          ))}
+        </div>
+      ) : data && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="dash-stats">
+            <span><b>{kr(data.cost)}</b> kostnad <Delta cur={data.cost} prev={data.prev?.cost} /></span>
+            <span><b>{n(data.clicks)}</b> klick <Delta cur={data.clicks} prev={data.prev?.clicks} /></span>
+            <span><b>{n(data.conversions)}</b> konv. <Delta cur={data.conversions} prev={data.prev?.conversions} /></span>
+            <span className="sub">värde {kr(data.value)}{data.roas != null ? ` · ROAS ${String(data.roas).replace('.', ',')}` : ''}</span>
+          </div>
+          <div>
+            <Spark series={data.series} valueKey="cost" label="kr" />
+            <WeekRow series={data.series} valueKey="cost" />
+          </div>
+          {data.warnings?.length ? (
+            <ul className="dash-list">
+              {data.warnings.slice(0, 6).map((w, i) => (
+                <li key={i}><span className="grow" style={{ color: w.level === 'red' ? '#b83a3a' : '#c98a16', fontSize: 12 }}><AlertTriangle size={12} /> {w.text}</span></li>
+              ))}
+            </ul>
+          ) : (
+            <span className="sub" style={{ fontSize: 12 }}><CheckCircle2 size={12} color="#2f8f55" /> Inga varningar från Google Ads.</span>
+          )}
+          {data.campaigns?.length ? (
+            <ul className="dash-list" style={{ maxHeight: 200, overflowY: 'auto' }}>
+              {data.campaigns.map(c => (
+                <li key={c.id}>
+                  <span className="grow">
+                    <span className="title"><i className="pw-dot" style={{ background: c.status !== 'ENABLED' ? '#9a9895' : CAMPAIGN_STATUS_TONE[c.primaryStatus] || '#c98a16' }} /> {c.name}</span>
+                    <span className="sub">{c.channel === 'PERFORMANCE_MAX' ? 'Performance Max' : c.channel}{c.dailyBudget ? ` · budget ${kr(c.dailyBudget)}/dag` : ''}{c.primaryStatus && c.primaryStatus !== 'ELIGIBLE' ? ` · ${c.primaryStatus}` : ''}</span>
+                  </span>
+                  <span className="num">{kr(c.cost)}<br /><span className="sub">{n(c.clicks)} klick · {n(c.conversions)} konv.</span></span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <span className="sub" style={{ fontSize: 11 }}>Δ jämför med föregående 28 dagar. Bara läsning – inga ändringar görs i Ads härifrån.</span>
         </div>
       )}
     </Card>
@@ -533,6 +627,7 @@ export default function Dashboard({ onNavigate, onOpenProduct }) {
           {/* Merchant + Google */}
           <MerchantCard onNavigate={onNavigate} />
           <GoogleCard onNavigate={onNavigate} />
+          <GoogleAdsCard />
 
           {/* Catalogue health */}
           <Card title="Kataloghälsa" icon={Search} span={6} linkLabel="SEO & Insikter" onLink={() => onNavigate('seo')}>
