@@ -1,0 +1,25 @@
+{%- comment -%}
+  Omnibus / prisinformationslagen: "Lägsta pris senaste 30 dagarna".
+
+  Värdet skrivs varje natt av Lumeno PIM till variantmetafältet
+  lumeno.lagsta_pris_30d — bara på varianter som är på rea. När rean tas
+  bort raderar PIM metafältet, och snippeten visar dessutom bara texten
+  när varianten faktiskt är på rea (ordinarie pris > pris), så texten
+  försvinner omedelbart även innan nattsynken hunnit köra.
+
+  Användning i produktmallen, direkt under priset:
+    {% render 'lagsta-pris-30d', product: product %}
+{%- endcomment -%}
+{%- liquid
+  assign lp30_variant = product.selected_or_first_available_variant
+  assign lp30 = lp30_variant.metafields.lumeno.lagsta_pris_30d
+-%}
+{%- if lp30_variant.compare_at_price > lp30_variant.price and lp30 != blank -%}
+  <p class="lagsta-pris-30d">
+    Lägsta pris senaste 30 dagarna: <span>{{ lp30 | times: 100 | money }}</span>
+  </p>
+  <style>
+    .lagsta-pris-30d { font-size: 0.85em; opacity: .75; margin: 6px 0 0; }
+    .lagsta-pris-30d span { font-weight: 600; }
+  </style>
+{%- endif -%}

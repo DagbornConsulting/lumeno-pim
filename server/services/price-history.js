@@ -191,5 +191,33 @@ export async function syncLowestPriceMetafields(store, prefetchedMap = null) {
     written += (m.metafieldsSet?.metafields || []).length;
     await new Promise(r => setTimeout(r, 200));
   }
-  return { onSale: report.items.length, written, errors: errors.slice(0, 10) };
+
+  // Rensa metafältet på varianter som INTE längre är på rea, så att gammal
+  // "lägsta pris"-text aldrig ligger kvar. Vi minns vilka varianter vi själva
+  // skrivit till (store.settings.lagsta_pris_synced) och raderar mellanskillnaden.
+  let cleared = 0;
+  const targetIds = new Set(targets.map(t => t.ownerId));
+  try {
+    const { data: fresh } = await supabase.from('stores').select('settings').eq('id', store.id).single();
+    const settings = fresh?.settings || store.settings || {};
+    const prevIds = Array.isArray(settings.lagsta_pris_synced) ? settings.lagsta_pris_synced : [];
+    const toClear = prevIds.filter(id => !targetIds.has(id));
+    for (let i = 0; i < toClear.length; i += 25) {
+      const batch = toClear.slice(i, i + 25).map(ownerId => ({ ownerId, namespace: 'lumeno', key: 'lagsta_pris_30d' }));
+      const m = await client.graphql(
+        'mutation($m: [MetafieldIdentifierInput!]!) { metafieldsDelete(metafields: $m) { deletedMetafields { ownerId } userErrors { field message } } }',
+        { m: batch });
+      const errs = (m.metafieldsDelete?.userErrors || []).filter(e => !/not found|does not exist/i.test(e.message));
+      if (errs.length) errors.push(...errs.map(e => e.message));
+      cleared += (m.metafieldsDelete?.deletedMetafields || []).filter(Boolean).length;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    // Kom ihåg dagens läge: varianterna som har metafältet efter denna synk.
+    const remembered = [...targetIds];
+    const { error: upErr } = await supabase.from('stores')
+      .update({ settings: { ...settings, lagsta_pris_synced: remembered } }).eq('id', store.id);
+    if (upErr) errors.push(`kunde inte spara synk-minnet: ${upErr.message}`);
+  } catch (e) { errors.push(`rensning: ${e.message}`); }
+
+  return { onSale: report.items.length, written, cleared, errors: errors.slice(0, 10) };
 }
