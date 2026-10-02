@@ -4001,6 +4001,73 @@ app.get('/api/dashboard/supplier', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Zero Shopify stock for products that DROPPED OUT of Affari's file ("utgått").
+// Explicit user action from the supplier card. Safety: the server recomputes
+// the discontinued set itself and only zeroes SKUs in it — a stray request can
+// never zero an in-assortment product. Body: { skus: ["..."] } or { all: true }.
+app.post('/api/supplier/zero-stock', async (req, res) => {
+  try {
+    const store = await priceWatchStore(req);
+    if (!store?.access_token) return res.status(400).json({ error: 'Butiken är inte kopplad till Shopify' });
+
+    const report = await supplierFile.supplierReport(store.id, 5000);
+    const discontinued = new Map(report.notInSupplier.filter(r => r.lastSeen).map(r => [r.sku, r]));
+    const requested = req.body?.all === true
+      ? [...discontinued.keys()]
+      : (Array.isArray(req.body?.skus) ? req.body.skus.map(s => String(s).trim()).filter(Boolean) : []);
+    if (!requested.length) return res.status(400).json({ error: 'Ange skus[] eller all: true' });
+    const allowed = requested.filter(s => discontinued.has(s));
+    const refused = requested.filter(s => !discontinued.has(s));
+    if (!allowed.length) return res.status(400).json({ error: 'Ingen av artiklarna är klassad som utgången — inget nollställdes.', refused });
+
+    // Lagerplats: samma självläkande upplösning som lagerimporten.
+    let locationGid = store.settings?.inventory_location_gid || null;
+    if (!locationGid) {
+      try { locationGid = await shopifySync.getPrimaryLocationGid(store); } catch { locationGid = null; }
+      if (!locationGid) { try { locationGid = await shopifySync.getAnyInventoryLocationGid(store); } catch { locationGid = null; } }
+      if (locationGid) {
+        try { await supabase.from('stores').update({ settings: { ...(store.settings || {}), inventory_location_gid: locationGid } }).eq('id', store.id); } catch (_) {}
+      }
+    }
+    if (!locationGid) return res.status(400).json({ error: 'Ingen lagerplats konfigurerad (inventory_location_gid).' });
+
+    const { map: shop } = await shopifySync.fetchInventoryMapFromShopify(store);
+    const changes = []; const before = []; let alreadyZero = 0; const notFound = [];
+    for (const sku of allowed) {
+      const variants = shop.get(sku);
+      if (!variants?.length) { notFound.push(sku); continue; }
+      for (const v of variants) {
+        if ((v.currentQty ?? 0) <= 0) { alreadyZero++; continue; }
+        changes.push({ inventoryItemId: v.inventoryItemId, quantity: 0 });
+        before.push({ sku, inventoryItemId: v.inventoryItemId, prevQty: v.currentQty });
+      }
+    }
+
+    let zeroed = 0; const errors = [];
+    for (let i = 0; i < changes.length; i += 100) {
+      const batch = changes.slice(i, i + 100);
+      try {
+        await shopifySync.setInventoryQuantitiesBatch(store, batch, locationGid);
+        zeroed += batch.length;
+      } catch (batchErr) {
+        for (const item of batch) {
+          try { await shopifySync.setInventoryQuantitiesBatch(store, [item], locationGid); zeroed++; }
+          catch (e) { errors.push({ inventoryItemId: item.inventoryItemId, error: e.message }); }
+          await new Promise(r => setTimeout(r, 150));
+        }
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    try {
+      await db.logActivity('supplier_zero_stock', 'store', store.id,
+        `Nollställde lager i Shopify för ${zeroed} utgångna Affari-varianter (${allowed.length} skus) av ${currentUserLabel(req)}`,
+        { before, refused, notFound }, store.id);
+    } catch (_) {}
+    res.json({ zeroed, alreadyZero, skus: allowed.length, notFound, refused, errors: errors.slice(0, 10) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // One-click from the supplier card's "Inköpspris ändrat" row: set the new sale
 // price and the new cost for one SKU in Shopify, mirror to PIM and the price-
 // watch rows. Explicit per-row user action — nothing runs automatically.

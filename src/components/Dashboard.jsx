@@ -417,6 +417,21 @@ function SupplierCard({ onOpenProduct }) {
     finally { setRowBusy(null); setRowConfirm(null); }
   };
 
+  const zeroStock = async (payload, label) => {
+    setRowBusy(label); setMsg(null);
+    try {
+      const resp = await fetch(`${API_URL}/supplier/zero-stock`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const d = await resp.json();
+      if (!resp.ok) throw new Error(d.error || 'Nollställning misslyckades');
+      setMsg(`Lager nollställt i Shopify: ${d.zeroed} varianter (${d.skus} artiklar)${d.alreadyZero ? `, ${d.alreadyZero} var redan 0` : ''}${d.errors?.length ? ` — ${d.errors.length} fel` : ''}.`);
+      await reload(true);
+    } catch (e) { setMsg(`Fel: ${e.message}`); }
+    finally { setRowBusy(null); setRowConfirm(null); }
+  };
+
   const upload = async (file) => {
     if (!file) return;
     setBusy(true); setMsg(null);
@@ -462,6 +477,22 @@ function SupplierCard({ onOpenProduct }) {
             ))}
             <span className="sub">· fil {ago(data.lastImport)}</span>
           </div>
+          {tab === 'notInSupplier' && (data.counts?.discontinued ?? 0) > 0 && (
+            <div style={{ margin: '6px 0 8px' }}>
+              {rowConfirm === '__alla_utgangna__' ? (
+                <>
+                  <button className="btn btn-primary btn-sm" disabled={rowBusy === '__alla_utgangna__'} onClick={() => zeroStock({ all: true }, '__alla_utgangna__')}>
+                    {rowBusy === '__alla_utgangna__' ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />} Ja, nollställ {data.counts.discontinued} utgångna
+                  </button>{' '}
+                  <button className="btn btn-secondary btn-sm" onClick={() => setRowConfirm(null)}>Avbryt</button>
+                </>
+              ) : (
+                <button className="btn btn-secondary btn-sm" title="Sätter lagersaldot till 0 i Shopify för alla produkter som utgått ur Affaris fil. Servern nollar bara artiklar den själv klassar som utgångna." onClick={() => setRowConfirm('__alla_utgangna__')}>
+                  Nollställ alla utgångna ({data.counts.discontinued})
+                </button>
+              )}
+            </div>
+          )}
           {list.length ? (
             <ul className="dash-list" style={{ maxHeight: 340, overflowY: 'auto' }}>
               {list.map(r => (
@@ -503,7 +534,21 @@ function SupplierCard({ onOpenProduct }) {
                   )}
                   {tab === 'outOfStock' && <span className="num" style={{ color: '#b83a3a' }}>lager {r.stock ?? 0}</span>}
                   {tab === 'notInSupplier' && r.lastSeen && (
-                    <span className="num" style={{ color: '#b83a3a' }}>utgått · sågs {r.lastSeen}<br /><span className="sub">sista kända lager {r.stock ?? '–'}</span></span>
+                    <>
+                      <span className="num" style={{ color: '#b83a3a' }}>utgått · sågs {r.lastSeen}<br /><span className="sub">sista kända lager {r.stock ?? '–'}</span></span>
+                      <span onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                        {rowConfirm === r.sku ? (
+                          <>
+                            <button className="btn btn-primary btn-sm" disabled={rowBusy === r.sku} onClick={() => zeroStock({ skus: [r.sku] }, r.sku)}>
+                              {rowBusy === r.sku ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />} Sätt lager 0
+                            </button>{' '}
+                            <button className="btn btn-secondary btn-sm" disabled={rowBusy === r.sku} onClick={() => setRowConfirm(null)}>Avbryt</button>
+                          </>
+                        ) : (
+                          <button className="btn btn-secondary btn-sm" title="Sätter lagersaldot till 0 i Shopify så produkten visas som slutsåld" onClick={() => setRowConfirm(r.sku)}>Nollställ lager</button>
+                        )}
+                      </span>
+                    </>
                   )}
                   {tab === 'newInSupplier' && (
                     <span className="num">à {kr(r.supplierPrice)}{r.pack > 1 ? ` × ${r.pack}` : ''} · lager {r.stock ?? '–'}<br />

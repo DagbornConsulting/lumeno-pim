@@ -247,7 +247,7 @@ export async function supplierReport(storeId, cap = 15) {
     lastImport,
     snapshotSkus: stock.length,
     liveSkus: live.size,
-    counts: { outOfStock: outOfStock.length, notDropship: notDropship.length, priceChanged: priceChanged.length, packChanged: packChanged.length, notInSupplier: notInSupplier.length, newInSupplier: newInSupplier.length },
+    counts: { outOfStock: outOfStock.length, notDropship: notDropship.length, priceChanged: priceChanged.length, packChanged: packChanged.length, notInSupplier: notInSupplier.length, newInSupplier: newInSupplier.length, discontinued: notInSupplier.filter(r => r.lastSeen).length },
     outOfStock: outOfStock.slice(0, cap),
     notDropship: notDropship.slice(0, cap),
     priceChanged: priceChanged.slice(0, cap),
