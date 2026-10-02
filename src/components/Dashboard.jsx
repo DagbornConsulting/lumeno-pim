@@ -502,6 +502,9 @@ function SupplierCard({ onOpenProduct }) {
                     </>
                   )}
                   {tab === 'outOfStock' && <span className="num" style={{ color: '#b83a3a' }}>lager {r.stock ?? 0}</span>}
+                  {tab === 'notInSupplier' && r.lastSeen && (
+                    <span className="num" style={{ color: '#b83a3a' }}>utgått · sågs {r.lastSeen}<br /><span className="sub">sista kända lager {r.stock ?? '–'}</span></span>
+                  )}
                   {tab === 'newInSupplier' && (
                     <span className="num">à {kr(r.supplierPrice)}{r.pack > 1 ? ` × ${r.pack}` : ''} · lager {r.stock ?? '–'}<br />
                       <span className="sub">{r.suggestedPrice != null ? `förslag ${kr(r.suggestedPrice)}` : 'pris saknas i filen'}</span></span>

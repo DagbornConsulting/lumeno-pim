@@ -162,9 +162,13 @@ export async function supplierReport(storeId, cap = 15) {
 
   const bySku = new Map(stock.map(s => [s.sku, s]));
   const outOfStock = [], notDropship = [], priceChanged = [], packChanged = [], notInSupplier = [];
+  let lastImport = null;
+  for (const s of stock) if (s.imported_at && (!lastImport || s.imported_at > lastImport)) lastImport = s.imported_at;
+
   const newInSupplier = [];
   for (const s of stock) {
     if (pimSkus.has(s.sku)) continue;
+    if (s.imported_at && lastImport && s.imported_at < lastImport) continue; // utgått — inte "ny"
     // Bara dropship-godkända (Excel-filen saknar flaggan → pack-kolumnen får duga som signal).
     if (!(s.dropship_ok === true || (s.dropship_ok == null && s.pack_qty != null))) continue;
     const unit = Number(s.supplier_price);
@@ -177,13 +181,18 @@ export async function supplierReport(storeId, cap = 15) {
     });
   }
   newInSupplier.sort((a, b) => (b.stock ?? 0) - (a.stock ?? 0));
-  let lastImport = null;
-  for (const s of stock) if (s.imported_at && (!lastImport || s.imported_at > lastImport)) lastImport = s.imported_at;
 
   for (const [sku, l] of live) {
     const s = bySku.get(sku);
     const base = { sku, title: l.product.title, productId: l.product.id, pack: l.pack };
     if (!s) { notInSupplier.push(base); continue; }
+    // Utgått ur sortimentet: raden fanns i en TIDIGARE fil men inte i den
+    // senaste (importen raderar aldrig rader, den bara uppdaterar). Utan den
+    // här kollen ser utgångna produkter friska ut med sitt sista lagersaldo.
+    if (s.imported_at && lastImport && s.imported_at < lastImport) {
+      notInSupplier.push({ ...base, lastSeen: String(s.imported_at).slice(0, 10), stock: s.stock });
+      continue; // gammal data — bedöm inte lager/pris på den
+    }
     if (s.in_stock === false || (s.stock != null && s.stock <= 0 && s.in_stock !== true)) {
       outOfStock.push({ ...base, stock: s.stock, deliveryWeek: s.delivery_week });
     }
@@ -198,6 +207,8 @@ export async function supplierReport(storeId, cap = 15) {
     }
   }
   priceChanged.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+  // Utgångna med kvarvarande lagersaldo överst — de är mest akuta att åtgärda.
+  notInSupplier.sort((a, b) => (b.stock ?? -1) - (a.stock ?? -1));
 
   // Pack-ändringar: loggade händelser (senaste 60 dagarna) där PIM ännu inte
   // uppdaterats till den nya förpackningen — försvinner när "Uppdatera i
