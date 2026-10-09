@@ -420,13 +420,20 @@ function SupplierCard({ onOpenProduct }) {
   const zeroStock = async (payload, label) => {
     setRowBusy(label); setMsg(null);
     try {
-      const resp = await fetch(`${API_URL}/supplier/zero-stock`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const d = await resp.json();
-      if (!resp.ok) throw new Error(d.error || 'Nollställning misslyckades');
-      setMsg(`Lager nollställt i Shopify: ${d.zeroed} varianter (${d.skus} artiklar)${d.alreadyZero ? `, ${d.alreadyZero} var redan 0` : ''}${d.errors?.length ? ` — ${d.errors.length} fel` : ''}.`);
+      // En stor bulk delas upp av servern (remaining > 0) — ropa tills allt är klart.
+      let zeroed = 0, alreadyZero = 0, errs = 0, skus = 0;
+      for (let round = 0; round < 10; round++) {
+        const resp = await fetch(`${API_URL}/supplier/zero-stock`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const d = await resp.json();
+        if (!resp.ok) throw new Error(d.error || 'Nollställning misslyckades');
+        zeroed += d.zeroed; alreadyZero += d.alreadyZero || 0; errs += d.errors?.length || 0; skus = d.skus;
+        if (!d.remaining) break;
+        setMsg(`Nollställer… ${zeroed} varianter klara, ${d.remaining} kvar.`);
+      }
+      setMsg(`Lager nollställt i Shopify: ${zeroed} varianter (${skus} artiklar)${alreadyZero ? `, ${alreadyZero} var redan 0` : ''}${errs ? ` — ${errs} fel` : ''}.`);
       await reload(true);
     } catch (e) { setMsg(`Fel: ${e.message}`); }
     finally { setRowBusy(null); setRowConfirm(null); }

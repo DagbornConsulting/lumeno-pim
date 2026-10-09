@@ -3296,32 +3296,37 @@ app.get('/api/cron/shopify-pull', async (req, res) => {
   // import mid-loop (~40 products/night). Budget the time instead: the import
   // stops cleanly, and the content/collection pulls only run when time remains
   // — they get their turn on nights without an import backlog.
+  // Ordning efter vikt, inte efter ålder: prisavstämningen och Omnibus-stegen
+  // är dagliga måsten (prishistoriken får inte få hål) och körs FÖRST — de är
+  // förutsägbart snabba. Importen av nya produkter kan vara stor efter en
+  // Affari-släppdag och får resten av budgeten; innehåll/collections bara när
+  // natten är lugn. Gränserna lämnar marginal till Vercels 60s-tak eftersom
+  // en deadline-koll bara hindrar ett steg från att STARTA, inte från att dra över.
   const startedAt = Date.now();
-  const deadlineMs = startedAt + 40_000;
+  const hardStop = startedAt + 50_000;
   const results = [];
   for (const store of (await db.getStores()) || []) {
     if (!store.access_token) continue;
     const r = { store: store.name };
-    try { r.newProducts = await importNewProductsFromShopify(store, { deadlineMs }); } catch (e) { r.newProductsError = e.message; }
-    // Fetch the live price/cost map once, share it between the steps.
+    // 1. Live pris/kostnads-kartan — delas av de kritiska stegen.
     let invMap = null;
-    if (Date.now() < deadlineMs) {
-      try { invMap = (await shopifySync.fetchInventoryMapFromShopify(store)).map; } catch (e) { r.invMapError = e.message; }
-    }
-    if (invMap && Date.now() < deadlineMs) {
-      try { r.reconcile = await reconcilePricesFromShopify(store, invMap); } catch (e) { r.reconcileError = e.message; }
-    } else if (!invMap) r.reconcileSkipped = 'tidsbudget slut';
-    // Daily price snapshot → "lägsta pris 30 dagar" (prisinformationslagen).
+    try { invMap = (await shopifySync.fetchInventoryMapFromShopify(store)).map; } catch (e) { r.invMapError = e.message; }
     if (invMap) {
+      try { r.reconcile = await reconcilePricesFromShopify(store, invMap); } catch (e) { r.reconcileError = e.message; }
+      // Daglig prisögonblicksbild → "lägsta pris 30 dagar" (prisinformationslagen).
       try { r.priceSnapshot = await priceHistory.snapshotPrices(store, invMap); } catch (e) { r.priceSnapshotError = e.message; }
-      if (Date.now() < deadlineMs + 10_000) {
-        try { r.lowestPriceMetafields = await priceHistory.syncLowestPriceMetafields(store, invMap); } catch (e) { r.lowestPriceMetafieldsError = e.message; }
-      }
+      try { r.lowestPriceMetafields = await priceHistory.syncLowestPriceMetafields(store, invMap); } catch (e) { r.lowestPriceMetafieldsError = e.message; }
     }
-    if (Date.now() < deadlineMs) {
+    // 2. Nya produkter med resten av budgeten (stannar snyggt vid deadline).
+    if (Date.now() < hardStop - 5_000) {
+      try { r.newProducts = await importNewProductsFromShopify(store, { deadlineMs: hardStop - 5_000 }); } catch (e) { r.newProductsError = e.message; }
+    } else r.newProductsSkipped = 'tidsbudget slut';
+    // 3. Innehåll/collections bara på lugna nätter — stegen saknar egen
+    //    deadline och måste få gott om luft för att inte spränga 60s-taket.
+    if (Date.now() < startedAt + 25_000) {
       try { r.pull = await pullAllFromShopify(store); } catch (e) { r.pullError = e.message; }
     } else r.pullSkipped = 'tidsbudget slut';
-    if (Date.now() < deadlineMs + 5_000) {
+    if (Date.now() < startedAt + 35_000) {
       try { r.collections = await pullCollectionsFromShopify(store); } catch (e) { r.collectionsError = e.message; }
     } else r.collectionsSkipped = 'tidsbudget slut';
     r.elapsedMs = Date.now() - startedAt;
@@ -4043,9 +4048,14 @@ app.post('/api/supplier/zero-stock', async (req, res) => {
       }
     }
 
-    let zeroed = 0; const errors = [];
+    // Egen deadline med marginal till Vercels 60s-tak: en stor bulk svarar
+    // hellre med `remaining` (front-end ropar igen) än dör i en timeout.
+    const deadline = Date.now() + 40_000;
+    let zeroed = 0; let attempted = 0; const errors = [];
     for (let i = 0; i < changes.length; i += 100) {
+      if (Date.now() > deadline) break;
       const batch = changes.slice(i, i + 100);
+      attempted += batch.length;
       try {
         await shopifySync.setInventoryQuantitiesBatch(store, batch, locationGid);
         zeroed += batch.length;
@@ -4064,7 +4074,7 @@ app.post('/api/supplier/zero-stock', async (req, res) => {
         `Nollställde lager i Shopify för ${zeroed} utgångna Affari-varianter (${allowed.length} skus) av ${currentUserLabel(req)}`,
         { before, refused, notFound }, store.id);
     } catch (_) {}
-    res.json({ zeroed, alreadyZero, skus: allowed.length, notFound, refused, errors: errors.slice(0, 10) });
+    res.json({ zeroed, alreadyZero, skus: allowed.length, remaining: changes.length - attempted, notFound, refused, errors: errors.slice(0, 10) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
